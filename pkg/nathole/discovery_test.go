@@ -367,10 +367,18 @@ func TestSTUNClientLeavesSocketAndDeadlineWithCaller(t *testing.T) {
 	require.Equal(t, "198.51.100.5:5000", response.externalAddr)
 	waitSTUNExchange(t, done)
 
-	_, _, err = conn.conn.ReadFromUDP(make([]byte, 1))
+	// The copy from the unrelated socket can land after Do has already
+	// accepted the matching response. It is not a client. Drain it.
+	// The read deadline doSTUNRequest set must still fire.
+	buf := make([]byte, 1500)
 	var netErr net.Error
-	require.True(t, errors.As(err, &netErr))
-	require.True(t, netErr.Timeout())
+	for {
+		_, _, err = conn.conn.ReadFromUDP(buf)
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			break
+		}
+		require.NoError(t, err)
+	}
 
 	require.NoError(t, conn.conn.SetDeadline(time.Time{}))
 	require.NoError(t, server.SetReadDeadline(time.Now().Add(testSTUNServerLimit)))
