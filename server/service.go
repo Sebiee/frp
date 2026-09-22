@@ -137,10 +137,11 @@ type Service struct {
 }
 
 func NewService(cfg *v1.ServerConfig) (*Service, error) {
-	tlsConfig, err := transport.NewServerTLSConfig(
+	tlsConfig, err := transport.NewServerTLSConfigWith(
 		cfg.Transport.TLS.CertFile,
 		cfg.Transport.TLS.KeyFile,
-		cfg.Transport.TLS.TrustedCaFile)
+		cfg.Transport.TLS.TrustedCaFile,
+		cfg.Transport.TLS.GetCertificate)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +264,11 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 
 	if cfg.QUICBindPort > 0 {
-		address := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.QUICBindPort))
+		quicBind := cfg.QUICBindAddr
+		if quicBind == "" {
+			quicBind = cfg.BindAddr
+		}
+		address := net.JoinHostPort(quicBind, strconv.Itoa(cfg.QUICBindPort))
 		quicTLSCfg := tlsConfig.Clone()
 		quicTLSCfg.NextProtos = []string{"frp"}
 		svr.quicListener, err = quic.ListenAddr(address, quicTLSCfg, &quic.Config{
@@ -297,6 +302,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	if cfg.VhostHTTPPort > 0 {
 		rp := vhost.NewHTTPReverseProxy(vhost.HTTPReverseProxyOptions{
 			ResponseHeaderTimeoutS: cfg.VhostHTTPTimeout,
+			BehindProxy:            cfg.VhostHTTPBehindProxy,
 		}, svr.httpVhostRouter)
 		svr.rc.HTTPReverseProxy = rp
 

@@ -15,6 +15,8 @@
 package v1
 
 import (
+	"crypto/tls"
+
 	"github.com/samber/lo"
 
 	"github.com/fatedier/frp/pkg/config/types"
@@ -37,6 +39,10 @@ type ServerConfig struct {
 	// QUICBindPort specifies the QUIC port that the server listens on.
 	// Set this value to 0 will disable this feature.
 	QUICBindPort int `json:"quicBindPort,omitempty"`
+	// QUICBindAddr is the address the QUIC listener binds. Empty means BindAddr.
+	// Set this to a public address while BindAddr stays on loopback when a
+	// front proxy owns the TCP control port.
+	QUICBindAddr string `json:"quicBindAddr,omitempty"`
 	// ProxyBindAddr specifies the address that the proxy binds to. This value
 	// may be the same as BindAddr.
 	ProxyBindAddr string `json:"proxyBindAddr,omitempty"`
@@ -47,6 +53,12 @@ type ServerConfig struct {
 	// VhostHTTPTimeout specifies the response header timeout for the Vhost
 	// HTTP server, in seconds. By default, this value is 60.
 	VhostHTTPTimeout int64 `json:"vhostHTTPTimeout,omitempty"`
+	// VhostHTTPBehindProxy means a trusted front proxy (one that terminated
+	// TLS) sits in front of the Vhost HTTP port. Its X-Forwarded-Proto and
+	// X-Forwarded-Host are kept, and a loopback peer is not appended to
+	// X-Forwarded-For. Leave it off when clients reach frps directly: they
+	// could set those headers themselves.
+	VhostHTTPBehindProxy bool `json:"vhostHTTPBehindProxy,omitempty"`
 	// VhostHTTPSPort specifies the port that the server listens for HTTPS
 	// Vhost requests. If this value is 0, the server will not listen for HTTPS
 	// requests.
@@ -108,6 +120,7 @@ func (c *ServerConfig) Complete() error {
 	c.SSHTunnelGateway.Complete()
 
 	c.BindAddr = util.EmptyOr(c.BindAddr, "0.0.0.0")
+	c.QUICBindAddr = util.EmptyOr(c.QUICBindAddr, c.BindAddr)
 	c.BindPort = util.EmptyOr(c.BindPort, 7000)
 	if c.ProxyBindAddr == "" {
 		c.ProxyBindAddr = c.BindAddr
@@ -191,7 +204,10 @@ func (c *ServerTransportConfig) Complete() {
 		c.HeartbeatTimeout = util.EmptyOr(c.HeartbeatTimeout, 90)
 	}
 	c.QUIC.Complete()
-	if c.TLS.TrustedCaFile != "" {
+	// A client CA means "require a client cert" on listeners that speak TLS.
+	// It does not have to mean "reject plaintext on the TCP control port":
+	// a front proxy may already have terminated TLS. AllowPlaintext keeps Force off.
+	if c.TLS.TrustedCaFile != "" && !c.TLS.AllowPlaintext {
 		c.TLS.Force = true
 	}
 }
@@ -199,6 +215,15 @@ func (c *ServerTransportConfig) Complete() {
 type TLSServerConfig struct {
 	// Force specifies whether to only accept TLS-encrypted connections.
 	Force bool `json:"force,omitempty"`
+	// AllowPlaintext keeps the TCP control port willing to accept a connection
+	// that a front proxy already decrypted, even when TrustedCaFile is set.
+	// QUIC still verifies client certificates. The zero value preserves the
+	// old behavior: TrustedCaFile turns Force on.
+	AllowPlaintext bool `json:"allowPlaintext,omitempty"`
+	// GetCertificate, when set, supplies the server certificate on each
+	// handshake. CertFile and KeyFile are not read. Not serialized; for
+	// in-process embedders that already hold the certificate.
+	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error) `json:"-"`
 
 	TLSConfig
 }

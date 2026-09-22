@@ -94,22 +94,33 @@ func newCertPool(caPath string) (*x509.CertPool, error) {
 }
 
 func NewServerTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
+	return NewServerTLSConfigWith(certPath, keyPath, caPath, nil)
+}
+
+// NewServerTLSConfigWith is NewServerTLSConfig with an optional per-handshake
+// server certificate. A non-nil get is used as-is and certPath/keyPath are
+// not read. Otherwise a cert on disk is re-read on every handshake, so a
+// renewed file is presented without restarting the process.
+func NewServerTLSConfigWith(certPath, keyPath, caPath string, get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) (*tls.Config, error) {
 	base := &tls.Config{}
 
-	if certPath == "" || keyPath == "" {
+	switch {
+	case get != nil:
+		base.GetCertificate = get
+	case certPath == "" || keyPath == "":
 		// server will generate tls conf by itself
 		cert, err := newRandomTLSKeyPair()
 		if err != nil {
 			return nil, err
 		}
 		base.Certificates = []tls.Certificate{*cert}
-	} else {
-		cert, err := newCustomTLSKeyPair(certPath, keyPath)
-		if err != nil {
+	default:
+		if _, err := newCustomTLSKeyPair(certPath, keyPath); err != nil {
 			return nil, err
 		}
-
-		base.Certificates = []tls.Certificate{*cert}
+		base.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return newCustomTLSKeyPair(certPath, keyPath)
+		}
 	}
 
 	if caPath != "" {

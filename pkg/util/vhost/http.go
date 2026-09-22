@@ -37,6 +37,7 @@ var ErrNoRouteFound = errors.New("no route found")
 
 type HTTPReverseProxyOptions struct {
 	ResponseHeaderTimeoutS int64
+	BehindProxy            bool
 }
 
 type HTTPReverseProxy struct {
@@ -44,6 +45,39 @@ type HTTPReverseProxy struct {
 	vhostRouter *Routers
 
 	responseHeaderTimeout time.Duration
+}
+
+// setForwarded records the client the way a front proxy already did.
+// SetXForwarded would overwrite X-Forwarded-Proto from this hop (plaintext,
+// when the edge terminated TLS) and append this hop's address. A loopback
+// peer is that front proxy, not another client, so its address is not added.
+func setForwarded(r *httputil.ProxyRequest) {
+	priorFor := r.In.Header.Values("X-Forwarded-For")
+	priorProto := r.In.Header.Get("X-Forwarded-Proto")
+	priorHost := r.In.Header.Get("X-Forwarded-Host")
+	r.Out.Header["X-Forwarded-For"] = append([]string(nil), priorFor...)
+	r.SetXForwarded()
+	if priorProto != "" {
+		r.Out.Header.Set("X-Forwarded-Proto", priorProto)
+	}
+	if priorHost != "" {
+		r.Out.Header.Set("X-Forwarded-Host", priorHost)
+	}
+	if len(priorFor) > 0 && loopbackPeer(r.In.RemoteAddr) {
+		r.Out.Header.Del("X-Forwarded-For")
+		for _, v := range priorFor {
+			r.Out.Header.Add("X-Forwarded-For", v)
+		}
+	}
+}
+
+func loopbackPeer(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *HTTPReverseProxy {
@@ -57,8 +91,12 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 	proxy := &httputil.ReverseProxy{
 		// Modify incoming requests by route policies.
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.Out.Header["X-Forwarded-For"] = r.In.Header["X-Forwarded-For"]
-			r.SetXForwarded()
+			if option.BehindProxy {
+				setForwarded(r)
+			} else {
+				r.Out.Header["X-Forwarded-For"] = r.In.Header["X-Forwarded-For"]
+				r.SetXForwarded()
+			}
 			req := r.Out
 			req.URL.Scheme = "http"
 			reqRouteInfo := req.Context().Value(RouteInfoKey).(*RequestRouteInfo)
