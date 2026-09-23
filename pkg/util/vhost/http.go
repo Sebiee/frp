@@ -171,6 +171,12 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 					return
 				}
 			}
+			// A matched route whose connection failed is a down origin, not
+			// a missing page.
+			if rc, _ := req.Context().Value(RouteConfigKey).(*RouteConfig); rc != nil {
+				rw.WriteHeader(http.StatusBadGateway)
+				return
+			}
 			rw.WriteHeader(http.StatusNotFound)
 			_, _ = rw.Write(getNotFoundPageContent())
 		},

@@ -82,6 +82,29 @@ func TestHTTPServerProtocols(t *testing.T) {
 	})
 }
 
+func TestHTTPReverseProxyDownOrigin(t *testing.T) {
+	rp := NewHTTPReverseProxy(HTTPReverseProxyOptions{}, NewRouters())
+	require.NoError(t, rp.Register(RouteConfig{
+		Domain: "up.example.com",
+		CreateConnFn: func(string) (net.Conn, error) {
+			return nil, fmt.Errorf("no work connection")
+		},
+	}))
+
+	for host, want := range map[string]int{
+		"up.example.com":   http.StatusBadGateway,
+		"none.example.com": http.StatusNotFound,
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+		req.RequestURI = "/"
+		rp.ServeHTTP(rec, req)
+		require.Equal(t, want, rec.Code, host)
+		require.Empty(t, rec.Header().Get("Server"), host)
+	}
+	require.Empty(t, NotFoundResponse().Header.Get("Server"))
+}
+
 func httpProtocols(http1, unencryptedHTTP2 bool) *http.Protocols {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(http1)
