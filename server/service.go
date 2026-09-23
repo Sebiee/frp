@@ -145,6 +145,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	tlsConfig.VerifyConnection = cfg.Transport.TLS.VerifyConnection
 
 	var webServer *httppkg.Server
 	if cfg.WebServer.Port > 0 {

@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
@@ -974,3 +975,21 @@ func (*countingCloseConn) RemoteAddr() net.Addr             { return lifecycleTe
 func (*countingCloseConn) SetDeadline(time.Time) error      { return nil }
 func (*countingCloseConn) SetReadDeadline(time.Time) error  { return nil }
 func (*countingCloseConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestServiceTLSVerifyConnection(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+
+	refused := errors.New("not a dark node")
+	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: port}
+	cfg.Transport.TLS.VerifyConnection = func(tls.ConnectionState) error { return refused }
+	require.NoError(t, cfg.Complete())
+	svr, err := NewService(cfg)
+	require.NoError(t, err)
+	defer svr.Close()
+
+	require.NotNil(t, svr.tlsConfig.VerifyConnection)
+	require.ErrorIs(t, svr.tlsConfig.VerifyConnection(tls.ConnectionState{}), refused)
+}

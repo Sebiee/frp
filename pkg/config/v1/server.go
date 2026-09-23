@@ -229,6 +229,11 @@ type TLSServerConfig struct {
 	// handshake. CertFile and KeyFile are not read. Not serialized; for
 	// in-process embedders that already hold the certificate.
 	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error) `json:"-"`
+	// VerifyConnection, when set, runs after the client certificate chain
+	// has verified against TrustedCaFile, on the TLS control port and on
+	// QUIC. An error rejects the connection. Not serialized; for in-process
+	// embedders that authorize clients by their certificate.
+	VerifyConnection func(tls.ConnectionState) error `json:"-"`
 
 	TLSConfig
 }
