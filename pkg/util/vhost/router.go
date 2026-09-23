@@ -15,6 +15,10 @@ type routerByHTTPUser map[string][]*Router
 type Routers struct {
 	indexByDomain map[string]routerByHTTPUser
 
+	// OnDomain is called when a domain is inserted into indexByDomain and
+	// when that entry is deleted. added is true for the insert.
+	OnDomain func(domain string, added bool)
+
 	mutex sync.RWMutex
 }
 
@@ -43,8 +47,8 @@ func (r *Routers) Add(domain, location, httpUser string, payload any) error {
 		return ErrRouterConfigConflict
 	}
 
-	routersByHTTPUser, found := r.indexByDomain[domain]
-	if !found {
+	routersByHTTPUser, domainAlreadyKnown := r.indexByDomain[domain]
+	if !domainAlreadyKnown {
 		routersByHTTPUser = make(map[string][]*Router)
 	}
 	vrs, found := routersByHTTPUser[httpUser]
@@ -66,6 +70,9 @@ func (r *Routers) Add(domain, location, httpUser string, payload any) error {
 
 	routersByHTTPUser[httpUser] = vrs
 	r.indexByDomain[domain] = routersByHTTPUser
+	if !domainAlreadyKnown && r.OnDomain != nil {
+		r.OnDomain(domain, true)
+	}
 	return nil
 }
 
@@ -84,13 +91,25 @@ func (r *Routers) Del(domain, location, httpUser string) {
 	if !found {
 		return
 	}
-	newVrs := make([]*Router, 0)
-	for _, vr := range vrs {
-		if vr.location != location {
-			newVrs = append(newVrs, vr)
+
+	if len(vrs) > 1 {
+		newVrs := make([]*Router, 0)
+		for _, vr := range vrs {
+			if vr.location != location {
+				newVrs = append(newVrs, vr)
+			}
+		}
+		routersByHTTPUser[httpUser] = newVrs
+	} else if vrs[0].location == location {
+		delete(routersByHTTPUser, httpUser)
+		if len(routersByHTTPUser) == 0 {
+			delete(r.indexByDomain, domain)
+			if r.OnDomain != nil {
+				r.OnDomain(domain, false)
+			}
 		}
 	}
-	routersByHTTPUser[httpUser] = newVrs
+
 }
 
 // Get returns the best location match for an exact host and exact HTTP user.

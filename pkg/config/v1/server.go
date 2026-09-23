@@ -59,6 +59,11 @@ type ServerConfig struct {
 	// X-Forwarded-For. Leave it off when clients reach frps directly: they
 	// could set those headers themselves.
 	VhostHTTPBehindProxy bool `json:"vhostHTTPBehindProxy,omitempty"`
+	// OnDomain, when set, is called after an HTTP vhost domain gains its first
+	// route (added true) and after it loses its last (added false). A
+	// load-balancer group shares one route, so this follows the domain, not
+	// each proxy. Not serialized. For in-process embedders.
+	OnDomain func(domain string, added bool) `json:"-"`
 	// VhostHTTPSPort specifies the port that the server listens for HTTPS
 	// Vhost requests. If this value is 0, the server will not listen for HTTPS
 	// requests.

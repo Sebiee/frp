@@ -24,6 +24,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRoutersOnDomain(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	routers := NewRouters()
+	routers.OnDomain = func(domain string, added bool) {
+		mu.Lock()
+		got = append(got, fmt.Sprintf("%s %v", domain, added))
+		mu.Unlock()
+	}
+
+	require.NoError(t, routers.Add("App.Example.com", "/", "", "a"))
+	require.NoError(t, routers.Add("app.example.com", "/x", "", "b"))
+	require.NoError(t, routers.Add("app.example.com", "/", "alice", "c"))
+	require.Error(t, routers.Add("app.example.com", "/", "", "d"))
+	routers.Del("app.example.com", "/x", "")
+	routers.Del("app.example.com", "/", "alice")
+	routers.Del("app.example.com", "/", "")
+	routers.Del("app.example.com", "/", "")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"app.example.com true", "app.example.com false"}, got)
+}
+
 func TestRoutersGet(t *testing.T) {
 	routers := NewRouters()
 	require.NoError(t, routers.Add("example.com", "/api", "alice", "exact-user"))

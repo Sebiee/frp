@@ -184,6 +184,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		cfg:               cfg,
 		ctx:               context.Background(),
 	}
+	svr.httpVhostRouter.OnDomain = cfg.OnDomain
 	if webServer != nil {
 		webServer.RouteRegister(svr.registerRouteHandlers)
 	}
