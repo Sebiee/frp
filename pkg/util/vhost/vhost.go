@@ -14,6 +14,7 @@ package vhost
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"strings"
@@ -124,6 +125,21 @@ type RouteConfig struct {
 	CreateConnFn           CreateConnFunc
 	ChooseEndpointFn       ChooseEndpointFunc
 	CreateConnByEndpointFn CreateConnByEndpointFunc
+}
+
+// poolHost is the key under which work connections for this route and
+// endpoint are kept idle: domain.location.user.endpoint, the last three
+// base64. Most routes have no location or user, whose encodings are
+// empty, so only a non-empty part is encoded.
+func (rc *RouteConfig) poolHost(endpoint string) string {
+	return rc.Domain + "." + b64(rc.Location) + "." + b64(rc.RouteByHTTPUser) + "." + b64(endpoint)
+}
+
+func b64(s string) string {
+	if s == "" {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 // listen for a new domain name, if rewriteHost is not empty and rewriteHost func is not nil,

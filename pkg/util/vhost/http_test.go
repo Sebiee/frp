@@ -2,6 +2,7 @@ package vhost
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -202,4 +203,21 @@ func TestGetRequestRouteUser(t *testing.T) {
 
 		require.Empty(t, getRequestRouteUser(req))
 	})
+}
+
+func TestPoolHostMatchesOldKey(t *testing.T) {
+	rc := &RouteConfig{Domain: "a.example", Location: "/x", RouteByHTTPUser: "bob"}
+	want := "a.example." +
+		base64.StdEncoding.EncodeToString([]byte("/x")) + "." +
+		base64.StdEncoding.EncodeToString([]byte("bob")) + "."
+	if got := rc.poolHost(""); got != want {
+		t.Fatalf("pool host %q, want %q", got, want)
+	}
+	if got := rc.poolHost(""); got != want {
+		t.Fatalf("second pool host %q, want the cached %q", got, want)
+	}
+	ep := base64.StdEncoding.EncodeToString([]byte("ep"))
+	if got := rc.poolHost("ep"); got != want+ep {
+		t.Fatalf("endpoint pool host %q, want %q", got, want+ep)
+	}
 }

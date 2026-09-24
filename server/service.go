@@ -749,6 +749,15 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 	}
 }
 
+// VhostHTTP is the site proxy. The edge calls it with a request it has
+// already parsed, instead of dialing the vhost port and parsing it again.
+func (svr *Service) VhostHTTP() http.Handler {
+	if svr.rc == nil || svr.rc.HTTPReverseProxy == nil {
+		return http.NotFoundHandler()
+	}
+	return svr.rc.HTTPReverseProxy
+}
+
 func (svr *Service) HandleQUICListener(l *quic.Listener) {
 	// Listen for incoming connections from client.
 	for {

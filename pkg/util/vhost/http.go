@@ -16,14 +16,12 @@ package vhost
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	stdlog "log"
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"time"
 
 	libio "github.com/fatedier/golib/io"
@@ -63,7 +61,7 @@ func setForwarded(r *httputil.ProxyRequest) {
 	if priorHost != "" {
 		r.Out.Header.Set("X-Forwarded-Host", priorHost)
 	}
-	if len(priorFor) > 0 && loopbackPeer(r.In.RemoteAddr) {
+	if len(priorFor) > 0 && trustedFront(r.In) {
 		r.Out.Header.Del("X-Forwarded-For")
 		for _, v := range priorFor {
 			r.Out.Header.Add("X-Forwarded-For", v)
@@ -78,6 +76,19 @@ func loopbackPeer(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// trustKey marks a request whose X-Forwarded-* the edge already set from
+// the visitor. This process is not another hop, so setForwarded keeps them.
+type trustKey struct{}
+
+// TrustForwarded marks r as already stamped by the edge.
+func TrustForwarded(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), trustKey{}, true))
+}
+
+func trustedFront(r *http.Request) bool {
+	return r.Context().Value(trustKey{}) != nil || loopbackPeer(r.RemoteAddr)
 }
 
 func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *HTTPReverseProxy {
@@ -100,7 +111,6 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 			req := r.Out
 			req.URL.Scheme = "http"
 			reqRouteInfo := req.Context().Value(RouteInfoKey).(*RequestRouteInfo)
-			originalHost, _ := httppkg.CanonicalHost(reqRouteInfo.Host)
 
 			rc := req.Context().Value(RouteConfigKey).(*RouteConfig)
 			if rc != nil {
@@ -113,14 +123,12 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 					// ignore error here, it will use CreateConnFn instead later
 					endpoint, _ = rc.ChooseEndpointFn()
 					reqRouteInfo.Endpoint = endpoint
+					originalHost, _ := httppkg.CanonicalHost(reqRouteInfo.Host)
 					log.Tracef("choose endpoint name [%s] for http request host [%s] path [%s] httpuser [%s]",
 						endpoint, originalHost, reqRouteInfo.URL, reqRouteInfo.HTTPUser)
 				}
-				// Set {domain}.{location}.{routeByHTTPUser}.{endpoint} as URL host here to let http transport reuse connections.
-				req.URL.Host = rc.Domain + "." +
-					base64.StdEncoding.EncodeToString([]byte(rc.Location)) + "." +
-					base64.StdEncoding.EncodeToString([]byte(rc.RouteByHTTPUser)) + "." +
-					base64.StdEncoding.EncodeToString([]byte(endpoint))
+				// The work connection pool's key: domain.location.user.endpoint.
+				req.URL.Host = rc.poolHost(endpoint)
 
 				for k, v := range rc.Headers {
 					req.Header.Set(k, v)
@@ -138,28 +146,17 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 			}
 			return nil
 		},
-		// Create a connection to one proxy routed by route policy.
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: rp.responseHeaderTimeout,
-			IdleConnTimeout:       60 * time.Second,
-			MaxIdleConnsPerHost:   5,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Create a connection to one proxy routed by route policy, and
+		// use it on the request's own goroutine (workConnTransport).
+		Transport: &workConnTransport{
+			dial: func(ctx context.Context) (net.Conn, error) {
 				return rp.CreateConnection(ctx.Value(RouteInfoKey).(*RequestRouteInfo), true)
 			},
-			Proxy: func(req *http.Request) (*url.URL, error) {
-				// Use proxy mode if there is host in HTTP first request line.
-				// GET http://example.com/ HTTP/1.1
-				// Host: example.com
-				//
-				// Normal:
-				// GET / HTTP/1.1
-				// Host: example.com
-				urlHost := req.Context().Value(RouteInfoKey).(*RequestRouteInfo).URLHost
-				if urlHost != "" {
-					return req.URL, nil
-				}
-				return nil, nil
-			},
+			responseHeaderTimeout: rp.responseHeaderTimeout,
+			idleTimeout:           60 * time.Second,
+			// One idle work conn per request in flight: a closed one is a new
+			// yamux stream on the next request.
+			maxIdlePerKey: 64,
 		},
 		BufferPool: pool.NewBuffer(32 * 1024),
 		ErrorLog:   stdlog.New(log.NewWriteLogger(log.WarnLevel, 2), "", 0),
@@ -306,7 +303,8 @@ func (rp *HTTPReverseProxy) injectRequestInfoToCtx(req *http.Request) *http.Requ
 	newctx := req.Context()
 	newctx = context.WithValue(newctx, RouteInfoKey, reqRouteInfo)
 	newctx = context.WithValue(newctx, RouteConfigKey, rc)
-	return req.Clone(newctx)
+	// Shallow: httputil.ReverseProxy makes its own copy to send.
+	return req.WithContext(newctx)
 }
 
 func (rp *HTTPReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {

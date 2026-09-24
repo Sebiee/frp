@@ -25,6 +25,25 @@ func TestSetForwardedKeepsFrontProxyHeaders(t *testing.T) {
 	}
 }
 
+func TestSetForwardedKeepsTrustedEdge(t *testing.T) {
+	in, out := forwardedPair(t, "198.51.100.2:443")
+	in = TrustForwarded(in)
+	out = in.Clone(in.Context())
+	in.Header.Set("X-Forwarded-For", "203.0.113.5")
+	in.Header.Set("X-Forwarded-Proto", "https")
+	in.Header.Set("X-Forwarded-Host", "app.example.com")
+	out.Header = in.Header.Clone()
+
+	setForwarded(&httputil.ProxyRequest{In: in, Out: out})
+
+	if got := out.Header.Get("X-Forwarded-For"); got != "203.0.113.5" {
+		t.Fatalf("for %q", got)
+	}
+	if got := out.Header.Get("X-Forwarded-Proto"); got != "https" {
+		t.Fatalf("proto %q", got)
+	}
+}
+
 func TestSetForwardedAppendsNonLoopbackPeer(t *testing.T) {
 	in, out := forwardedPair(t, "198.51.100.2:443")
 	in.Header.Set("X-Forwarded-For", "203.0.113.5")
