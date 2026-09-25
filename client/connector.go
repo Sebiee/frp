@@ -108,7 +108,8 @@ func (c *defaultConnectorImpl) Open() error {
 		if sn == "" {
 			sn = c.cfg.ServerAddr
 		}
-		if lo.FromPtr(c.cfg.Transport.TLS.Enable) {
+		tlsEnable := lo.FromPtr(c.cfg.Transport.TLS.Enable)
+		if tlsEnable {
 			tlsConfig, err = transport.NewClientTLSConfig(
 				c.cfg.Transport.TLS.CertFile,
 				c.cfg.Transport.TLS.KeyFile,
@@ -121,6 +122,9 @@ func (c *defaultConnectorImpl) Open() error {
 			xl.Warnf("fail to build tls configuration, err: %v", err)
 			return err
 		}
+		// QUIC with tls.enable off is frp's plain transport: nothing is
+		// verified, as before. With it on, only insecureSkipVerify skips.
+		tlsConfig.InsecureSkipVerify = !tlsEnable || c.cfg.Transport.TLS.InsecureSkipVerify
 		tlsConfig.NextProtos = []string{"frp"}
 
 		conn, err := quic.DialAddr(
@@ -203,6 +207,7 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 			xl.Warnf("fail to build tls configuration, err: %v", err)
 			return nil, err
 		}
+		tlsConfig.InsecureSkipVerify = c.cfg.Transport.TLS.InsecureSkipVerify
 	}
 
 	proxyType, addr, auth, err := libnet.ParseProxyURL(c.cfg.Transport.ProxyURL)

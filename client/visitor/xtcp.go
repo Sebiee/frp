@@ -405,6 +405,9 @@ func (qs *QUICTunnelSession) Init(listenConn *net.UDPConn, raddr *net.UDPAddr) e
 	if err != nil {
 		return fmt.Errorf("create tls config error: %v", err)
 	}
+	// The peer's certificate is self-signed; the xtcp secret key is what
+	// authenticates it.
+	tlsConfig.InsecureSkipVerify = true
 	tlsConfig.NextProtos = []string{"frp"}
 	quicConn, err := quic.Dial(context.Background(), listenConn, raddr, tlsConfig,
 		&quic.Config{

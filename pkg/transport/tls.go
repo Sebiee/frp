@@ -136,6 +136,10 @@ func NewServerTLSConfigWith(certPath, keyPath, caPath string, get func(*tls.Clie
 	return base, nil
 }
 
+// NewClientTLSConfig verifies the server against the CAs in caPath, or
+// against the system roots when caPath is empty. A caller that means not
+// to verify, such as an xtcp peer with its self-signed certificate, sets
+// InsecureSkipVerify on the result itself.
 func NewClientTLSConfig(certPath, keyPath, caPath, serverName string) (*tls.Config, error) {
 	base := &tls.Config{}
 
@@ -157,9 +161,6 @@ func NewClientTLSConfig(certPath, keyPath, caPath, serverName string) (*tls.Conf
 		}
 
 		base.RootCAs = pool
-		base.InsecureSkipVerify = false
-	} else {
-		base.InsecureSkipVerify = true
 	}
 
 	return base, nil

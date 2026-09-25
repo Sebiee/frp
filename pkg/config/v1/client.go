@@ -175,6 +175,10 @@ type TLSClientConfig struct {
 	// first custom byte when tls is enabled.
 	// Since v0.50.0, the default value has been changed to true, and the first custom byte is disabled by default.
 	DisableCustomTLSFirstByte *bool `json:"disableCustomTLSFirstByte,omitempty"`
+	// InsecureSkipVerify accepts any certificate the server presents. Without
+	// it, the server's certificate must chain to TrustedCaFile, or to the
+	// system roots when that is empty.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 
 	TLSConfig
 }
