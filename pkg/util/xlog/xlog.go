@@ -17,6 +17,8 @@ package xlog
 import (
 	"cmp"
 	"slices"
+	"sync"
+	"sync/atomic"
 
 	"github.com/fatedier/frp/pkg/util/log"
 )
@@ -30,23 +32,36 @@ type LogPrefix struct {
 	Priority int
 }
 
-// Logger is not thread safety for operations on prefix
+// Logger is safe for concurrent use: a client's logger is shared by its
+// control's goroutines while a reconnect adds the new run id to it.
 type Logger struct {
+	mu       sync.Mutex
 	prefixes []LogPrefix
 
-	prefixString string
+	prefixString atomic.Pointer[string] // what every line starts with
 }
 
 func New() *Logger {
-	return &Logger{
+	l := &Logger{
 		prefixes: make([]LogPrefix, 0),
 	}
+	l.prefixString.Store(new(string))
+	return l
+}
+
+func (l *Logger) prefix() string {
+	if p := l.prefixString.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func (l *Logger) ResetPrefixes() (old []LogPrefix) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	old = l.prefixes
 	l.prefixes = make([]LogPrefix, 0)
-	l.prefixString = ""
+	l.prefixString.Store(new(string))
 	return
 }
 
@@ -59,6 +74,8 @@ func (l *Logger) AppendPrefix(prefix string) *Logger {
 }
 
 func (l *Logger) AddPrefix(prefix LogPrefix) *Logger {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	found := false
 	if prefix.Priority <= 0 {
 		prefix.Priority = 10
@@ -78,39 +95,44 @@ func (l *Logger) AddPrefix(prefix LogPrefix) *Logger {
 	return l
 }
 
+// renderPrefixString needs l.mu held.
 func (l *Logger) renderPrefixString() {
 	slices.SortStableFunc(l.prefixes, func(a, b LogPrefix) int {
 		return cmp.Compare(a.Priority, b.Priority)
 	})
-	l.prefixString = ""
+	s := ""
 	for _, v := range l.prefixes {
-		l.prefixString += "[" + v.Value + "] "
+		s += "[" + v.Value + "] "
 	}
+	l.prefixString.Store(&s)
 }
 
 func (l *Logger) Spawn() *Logger {
+	l.mu.Lock()
+	prefixes := slices.Clone(l.prefixes)
+	l.mu.Unlock()
 	nl := New()
-	nl.prefixes = append(nl.prefixes, l.prefixes...)
+	nl.prefixes = prefixes
 	nl.renderPrefixString()
 	return nl
 }
 
 func (l *Logger) Errorf(format string, v ...any) {
-	log.Logger.WithPrefix(l.prefixString).Errorf(format, v...)
+	log.Logger.WithPrefix(l.prefix()).Errorf(format, v...)
 }
 
 func (l *Logger) Warnf(format string, v ...any) {
-	log.Logger.WithPrefix(l.prefixString).Warnf(format, v...)
+	log.Logger.WithPrefix(l.prefix()).Warnf(format, v...)
 }
 
 func (l *Logger) Infof(format string, v ...any) {
-	log.Logger.WithPrefix(l.prefixString).Infof(format, v...)
+	log.Logger.WithPrefix(l.prefix()).Infof(format, v...)
 }
 
 func (l *Logger) Debugf(format string, v ...any) {
-	log.Logger.WithPrefix(l.prefixString).Debugf(format, v...)
+	log.Logger.WithPrefix(l.prefix()).Debugf(format, v...)
 }
 
 func (l *Logger) Tracef(format string, v ...any) {
-	log.Logger.WithPrefix(l.prefixString).Tracef(format, v...)
+	log.Logger.WithPrefix(l.prefix()).Tracef(format, v...)
 }
