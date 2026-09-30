@@ -80,7 +80,7 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 	}
 	loginRespMsg := loginResult.resp
 	if loginRespMsg.Error != "" {
-		return nil, errors.New(loginRespMsg.Error)
+		return nil, &LoginRefusedError{Msg: loginRespMsg.Error}
 	}
 
 	var controlRW io.ReadWriter = conn

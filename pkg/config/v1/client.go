@@ -142,6 +142,16 @@ type ClientTransportConfig struct {
 	HeartbeatTimeout int64 `json:"heartbeatTimeout,omitempty"`
 	// TLS specifies TLS settings for the connection to the server.
 	TLS TLSClientConfig `json:"tls,omitempty"`
+	// DeadServerTimeout, in seconds, bounds how long a TCP connection to the
+	// server (tcp, websocket, wss) may go without the server acknowledging
+	// what frpc sent, or answering the keepalive probes frpc then sends
+	// every second while the connection is idle. Past it, frpc drops the
+	// connection and dials again. It finds a server that went away without
+	// closing the connection (a reset, a crash, a network cut) in seconds,
+	// where TCP's own timeouts take minutes. A busy connection is not
+	// affected: its acknowledgments keep coming however long its queue is.
+	// 0, the default, leaves the system's TCP timeouts.
+	DeadServerTimeout int64 `json:"deadServerTimeout,omitempty"`
 }
 
 func (c *ClientTransportConfig) Complete() {

@@ -237,6 +237,13 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 		dialOptions = append(dialOptions, libnet.WithTLSConfig(tlsConfig))
 	}
 
+	if t := c.cfg.Transport.DeadServerTimeout; t > 0 && protocol == "tcp" {
+		// Before any other hook: on the TCP connection itself.
+		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
+			Priority: 1,
+			Hook:     deadServerHook(time.Duration(t) * time.Second),
+		}))
+	}
 	if c.cfg.Transport.ConnectServerLocalIP != "" {
 		dialOptions = append(dialOptions, libnet.WithLocalAddr(c.cfg.Transport.ConnectServerLocalIP))
 	}

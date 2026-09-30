@@ -368,13 +368,12 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 	}
 
 	// try to reconnect to server until success
-	wait.BackoffUntil(loginFunc, wait.NewFastBackoffManager(
-		wait.FastBackoffOptions{
-			Duration:    time.Second,
-			Factor:      2,
-			Jitter:      0.1,
-			MaxDuration: maxInterval,
-		}), true, svr.ctx.Done())
+	backoff := newReconnectBackoff(maxInterval)
+	wait.BackoffUntil(func() (bool, error) {
+		done, err := loginFunc()
+		backoff.lastErr = err
+		return done, err
+	}, backoff, true, svr.ctx.Done())
 }
 
 func (svr *Service) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {
