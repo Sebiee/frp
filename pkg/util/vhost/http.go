@@ -241,7 +241,7 @@ func (rp *HTTPReverseProxy) CreateConnection(reqRouteInfo *RequestRouteInfo, byE
 			return fn(reqRouteInfo.RemoteAddr)
 		}
 	}
-	return nil, fmt.Errorf("%v: %s %s %s", ErrNoRouteFound, host, reqRouteInfo.URL, reqRouteInfo.HTTPUser)
+	return nil, fmt.Errorf("%w: %s %s %s", ErrNoRouteFound, host, reqRouteInfo.URL, reqRouteInfo.HTTPUser)
 }
 
 func checkRouteAuthByRequest(req *http.Request, rc *RouteConfig) bool {
