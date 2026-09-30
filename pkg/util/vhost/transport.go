@@ -38,9 +38,13 @@ type workConnTransport struct {
 	responseHeaderTimeout time.Duration
 	idleTimeout           time.Duration
 	maxIdlePerKey         int
+	// onError, when set, gets a response body that broke off: the proxy
+	// has sent the headers by then, so it reports nothing itself.
+	onError func(*http.Request, error)
 
-	mu   sync.Mutex
-	idle map[string][]*workConn // oldest first; reuse takes the newest
+	mu     sync.Mutex
+	idle   map[string][]*workConn // oldest first; reuse takes the newest
+	active atomic.Int64           // work connections carrying a request
 }
 
 type workConn struct {
@@ -49,6 +53,30 @@ type workConn struct {
 	bw        *bufio.Writer
 	read      int64 // bytes read from the connection, under br
 	idleSince time.Time
+	busy      atomic.Bool // counted in active
+}
+
+// acquire counts wc as carrying a request, release as done with it.
+func (t *workConnTransport) acquire(wc *workConn) {
+	if wc.busy.CompareAndSwap(false, true) {
+		t.active.Add(1)
+	}
+}
+
+func (t *workConnTransport) release(wc *workConn) {
+	if wc.busy.CompareAndSwap(true, false) {
+		t.active.Add(-1)
+	}
+}
+
+// counts reports the work connections kept idle and those carrying a request.
+func (t *workConnTransport) counts() (idle, active int) {
+	t.mu.Lock()
+	for _, conns := range t.idle {
+		idle += len(conns)
+	}
+	t.mu.Unlock()
+	return idle, int(t.active.Load())
 }
 
 // workConnWriteBuffer holds a whole ordinary request, so it leaves in one
@@ -103,10 +131,18 @@ func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		if wc == nil {
 			c, err := t.dial(req.Context())
 			if err != nil {
-				return nil, err
+				if req.Context().Err() != nil {
+					return nil, req.Context().Err()
+				}
+				stage := StageDial
+				if errors.Is(err, ErrNoRouteFound) {
+					stage = StageRoute
+				}
+				return nil, &ProxyError{Stage: stage, Err: err}
 			}
 			wc = newWorkConn(c)
 		}
+		t.acquire(wc)
 		resp, stale, err := t.roundTrip(wc, key, req)
 		if err == nil {
 			return resp, nil
@@ -125,13 +161,14 @@ func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error)
 func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Request) (resp *http.Response, stale bool, err error) {
 	// A visitor who leaves closes the connection, wherever it is.
 	stopCancel := context.AfterFunc(req.Context(), func() { _ = wc.Close() })
-	fail := func(err error, stale bool) (*http.Response, bool, error) {
+	fail := func(stage string, err error, stale bool) (*http.Response, bool, error) {
 		stopCancel()
+		t.release(wc)
 		_ = wc.Close()
 		if req.Context().Err() != nil {
 			return nil, false, req.Context().Err()
 		}
-		return nil, stale, err
+		return nil, stale, &ProxyError{Stage: stage, Err: err}
 	}
 
 	if proxyMode(req) {
@@ -143,12 +180,12 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 		err = wc.bw.Flush()
 	}
 	if err != nil {
-		return fail(err, true)
+		return fail(StageSend, err, true)
 	}
 
 	before := wc.read
 	var timedOut atomic.Bool
-	timer := time.AfterFunc(t.responseHeaderTimeout, func() {
+	timer := time.AfterFunc(responseHeaderTimeout(req.Context(), t.responseHeaderTimeout), func() {
 		timedOut.Store(true)
 		_ = wc.Close()
 	})
@@ -166,23 +203,30 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 		}
 	}
 	if !timer.Stop() || timedOut.Load() {
-		return fail(errResponseHeaderTimeout{}, false)
+		return fail(StageHeaders, errResponseHeaderTimeout{}, false)
 	}
 	if err != nil {
 		// Nothing of a response came: the connection was dead already.
-		return fail(err, wc.read == before)
+		return fail(StageHeaders, err, wc.read == before)
 	}
 
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		// The proxy copies both ways on the connection itself.
 		stopCancel()
-		resp.Body = &upgradedBody{Reader: wc.br, workConn: wc}
+		resp.Body = &upgradedBody{Reader: wc.br, workConn: wc, t: t}
 		return resp, false, nil
 	}
 	resp.Body = &returnBody{
 		ReadCloser: resp.Body,
+		fail: func(err error) {
+			// A visitor who left closed the connection: not the origin's.
+			if t.onError != nil && req.Context().Err() == nil {
+				t.onError(req, &ProxyError{Stage: StageBody, Err: err})
+			}
+		},
 		done: func(clean bool) {
 			reuse := stopCancel() && clean && !resp.Close && !req.Close
+			t.release(wc)
 			if reuse {
 				t.put(key, wc)
 			} else {
@@ -254,12 +298,18 @@ type returnBody struct {
 	io.ReadCloser
 	once sync.Once
 	done func(clean bool)
+	fail func(err error) // a read that failed; once
 }
 
 func (b *returnBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if err == io.EOF {
 		b.once.Do(func() { b.done(true) })
+	} else if err != nil {
+		b.once.Do(func() {
+			b.fail(err)
+			b.done(false)
+		})
 	}
 	return n, err
 }
@@ -275,8 +325,12 @@ func (b *returnBody) Close() error {
 type upgradedBody struct {
 	io.Reader
 	*workConn
+	t *workConnTransport
 }
 
 func (b *upgradedBody) Read(p []byte) (int, error)  { return b.Reader.Read(p) }
 func (b *upgradedBody) Write(p []byte) (int, error) { return b.workConn.Conn.Write(p) }
-func (b *upgradedBody) Close() error                { return b.workConn.Conn.Close() }
+func (b *upgradedBody) Close() error {
+	b.t.release(b.workConn)
+	return b.workConn.Conn.Close()
+}

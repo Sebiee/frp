@@ -36,13 +36,27 @@ var ErrNoRouteFound = errors.New("no route found")
 type HTTPReverseProxyOptions struct {
 	ResponseHeaderTimeoutS int64
 	BehindProxy            bool
+	// OnError, when set, gets every request the proxy failed, in place of
+	// its warning: a *ProxyError, which names the stage, or the request
+	// context's error when the visitor left. It runs on the request's
+	// goroutine, with the request the proxy got, or for StageBody the one
+	// it sent. The visitor has had a 502 or 504, or, for StageBody, a
+	// response cut short.
+	OnError func(r *http.Request, err error)
 }
 
 type HTTPReverseProxy struct {
 	proxy       http.Handler
 	vhostRouter *Routers
+	transport   *workConnTransport
 
 	responseHeaderTimeout time.Duration
+}
+
+// WorkConns reports the work connections the proxy keeps idle for the
+// next request, and those carrying one now.
+func (rp *HTTPReverseProxy) WorkConns() (idle, active int) {
+	return rp.transport.counts()
 }
 
 // setForwarded records the client the way a front proxy already did.
@@ -99,6 +113,17 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 		responseHeaderTimeout: time.Duration(option.ResponseHeaderTimeoutS) * time.Second,
 		vhostRouter:           vhostRouter,
 	}
+	rp.transport = &workConnTransport{
+		dial: func(ctx context.Context) (net.Conn, error) {
+			return rp.CreateConnection(ctx.Value(RouteInfoKey).(*RequestRouteInfo), true)
+		},
+		responseHeaderTimeout: rp.responseHeaderTimeout,
+		idleTimeout:           60 * time.Second,
+		// One idle work conn per request in flight: a closed one is a new
+		// yamux stream on the next request.
+		maxIdlePerKey: 64,
+		onError:       option.OnError,
+	}
 	proxy := &httputil.ReverseProxy{
 		// Modify incoming requests by route policies.
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -148,25 +173,19 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 		},
 		// Create a connection to one proxy routed by route policy, and
 		// use it on the request's own goroutine (workConnTransport).
-		Transport: &workConnTransport{
-			dial: func(ctx context.Context) (net.Conn, error) {
-				return rp.CreateConnection(ctx.Value(RouteInfoKey).(*RequestRouteInfo), true)
-			},
-			responseHeaderTimeout: rp.responseHeaderTimeout,
-			idleTimeout:           60 * time.Second,
-			// One idle work conn per request in flight: a closed one is a new
-			// yamux stream on the next request.
-			maxIdlePerKey: 64,
-		},
+		Transport:  rp.transport,
 		BufferPool: pool.NewBuffer(32 * 1024),
 		ErrorLog:   stdlog.New(log.NewWriteLogger(log.WarnLevel, 2), "", 0),
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
-			log.Logf(log.WarnLevel, 1, "do http proxy request [host: %s] error: %v", req.Host, err)
-			if err != nil {
-				if e, ok := err.(net.Error); ok && e.Timeout() {
-					rw.WriteHeader(http.StatusGatewayTimeout)
-					return
-				}
+			if option.OnError != nil {
+				option.OnError(req, err)
+			} else {
+				log.Logf(log.WarnLevel, 1, "do http proxy request [host: %s] error: %v", req.Host, err)
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				rw.WriteHeader(http.StatusGatewayTimeout)
+				return
 			}
 			// A matched route whose connection failed is a down origin, not
 			// a missing page.
