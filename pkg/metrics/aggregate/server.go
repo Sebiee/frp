@@ -30,6 +30,12 @@ func EnablePrometheus() {
 	sm.Add(prometheus.ServerMetrics)
 }
 
+// Add also marks metrics to m: an embedder's own. Call it before any
+// service starts.
+func Add(m metrics.ServerMetrics) {
+	sm.Add(m)
+}
+
 var sm = &serverMetrics{}
 
 func init() {

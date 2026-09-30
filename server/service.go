@@ -305,6 +305,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		rp := vhost.NewHTTPReverseProxy(vhost.HTTPReverseProxyOptions{
 			ResponseHeaderTimeoutS: cfg.VhostHTTPTimeout,
 			BehindProxy:            cfg.VhostHTTPBehindProxy,
+			OnError:                cfg.OnProxyError,
 		}, svr.httpVhostRouter)
 		svr.rc.HTTPReverseProxy = rp
 
@@ -523,7 +524,14 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 			m,
 			acceptedConn.wireProtocol,
 			acceptedConn.clientHelloPresent,
-		); err != nil {
+		); errors.Is(err, errWorkConnPoolFull) {
+			// A surplus, not a fault: closed without an error message, which
+			// the client would log as an error.
+			if svr.cfg.OnWorkConnDiscarded != nil {
+				svr.cfg.OnWorkConnDiscarded()
+			}
+			conn.Close()
+		} else if err != nil {
 			_ = acceptedConn.conn.WriteMsg(&msg.StartWorkConn{
 				Error: util.GenerateResponseErrorString("invalid NewWorkConn", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
 			})
@@ -758,6 +766,17 @@ func (svr *Service) VhostHTTP() http.Handler {
 	return svr.rc.HTTPReverseProxy
 }
 
+// WorkConns counts the HTTP vhost's work connections: pooled, sent ahead
+// by clients and waiting for a request; idle, kept by the proxy after a
+// request for the next; active, carrying a request.
+func (svr *Service) WorkConns() (pooled, idle, active int) {
+	pooled = svr.ctlManager.PooledWorkConns()
+	if svr.rc != nil && svr.rc.HTTPReverseProxy != nil {
+		idle, active = svr.rc.HTTPReverseProxy.WorkConns()
+	}
+	return pooled, idle, active
+}
+
 func (svr *Service) HandleQUICListener(l *quic.Listener) {
 	// Listen for incoming connections from client.
 	for {
@@ -768,6 +787,11 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 		}
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn *quic.Conn) {
+			if svr.cfg.OnQUICConn != nil {
+				if done := svr.cfg.OnQUICConn(frpConn.ConnectionState().TLS); done != nil {
+					defer done()
+				}
+			}
 			for {
 				stream, err := frpConn.AcceptStream(context.Background())
 				if err != nil {

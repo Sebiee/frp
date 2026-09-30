@@ -16,6 +16,7 @@ package v1
 
 import (
 	"crypto/tls"
+	"net/http"
 
 	"github.com/samber/lo"
 
@@ -64,6 +65,19 @@ type ServerConfig struct {
 	// load-balancer group shares one route, so this follows the domain, not
 	// each proxy. Not serialized. For in-process embedders.
 	OnDomain func(domain string, added bool) `json:"-"`
+	// OnProxyError, when set, gets every HTTP vhost request that failed, in
+	// place of frps's warning (vhost.HTTPReverseProxyOptions.OnError). Not
+	// serialized. For in-process embedders.
+	OnProxyError func(r *http.Request, err error) `json:"-"`
+	// OnWorkConnDiscarded, when set, is called for each work connection a
+	// client sent beyond what its pool holds. frps closes such a connection
+	// without an error message, so the client does not log one. Not
+	// serialized. For in-process embedders.
+	OnWorkConnDiscarded func() `json:"-"`
+	// OnQUICConn, when set, is called for each client connection accepted
+	// on QUIC, after its handshake; the func it returns, if not nil, when
+	// the connection ends. Not serialized. For in-process embedders.
+	OnQUICConn func(tls.ConnectionState) func() `json:"-"`
 	// VhostHTTPSPort specifies the port that the server listens for HTTPS
 	// Vhost requests. If this value is 0, the server will not listen for HTTPS
 	// requests.

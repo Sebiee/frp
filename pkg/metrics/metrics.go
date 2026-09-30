@@ -21,4 +21,6 @@ import (
 var (
 	EnableMem        = aggregate.EnableMem
 	EnablePrometheus = aggregate.EnablePrometheus
+	// Add marks metrics to an embedder's own ServerMetrics too.
+	Add = aggregate.Add
 )

@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -332,8 +333,24 @@ func (cm *ControlManager) RegisterWorkConn(ctl *Control, conn *proxy.WorkConn) e
 		return nil
 	default:
 		ctl.xl.Debugf("work connection pool is full, discarding")
-		return fmt.Errorf("work connection pool is full, discarding")
+		return errWorkConnPoolFull
 	}
+}
+
+// errWorkConnPoolFull is a work connection the client sent beyond what its
+// pool holds: a surplus after a burst, not a fault.
+var errWorkConnPoolFull = errors.New("work connection pool is full, discarding")
+
+// PooledWorkConns counts the work connections the clients sent ahead,
+// waiting in their pools for a request.
+func (cm *ControlManager) PooledWorkConns() int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	n := 0
+	for _, entry := range cm.ctlsByRunID {
+		n += len(entry.ctl.workConnCh)
+	}
+	return n
 }
 
 func (cm *ControlManager) Close() error {
