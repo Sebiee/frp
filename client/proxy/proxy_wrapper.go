@@ -263,17 +263,49 @@ func (pw *Wrapper) statusFailedCallback() {
 	xl.Infof("health check failed")
 }
 
+// startWait bounds how long a work connection waits for its proxy to
+// start: frps can send one as soon as it registers the proxy, before this
+// client has read the reply that starts it, since the two travel on
+// different streams.
+const startWait = 2 * time.Second
+
 func (pw *Wrapper) InWorkConn(workConn net.Conn, m *msg.StartWorkConn) {
 	xl := pw.xl
 	pw.mu.RLock()
-	pxy := pw.pxy
+	pxy, phase := pw.pxy, pw.Phase
 	pw.mu.RUnlock()
-	if pxy != nil && pw.Phase == ProxyPhaseRunning {
+	switch {
+	case pxy != nil && phase == ProxyPhaseRunning:
 		xl.Debugf("start a new work connection, localAddr: %s remoteAddr: %s", workConn.LocalAddr().String(), workConn.RemoteAddr().String())
 		go pxy.InWorkConn(workConn, m)
-	} else {
+	case pxy != nil && phase == ProxyPhaseWaitStart:
+		// Dropping it would fail the visitor's request, which frps has
+		// already routed here.
+		go pw.inWorkConnOnceRunning(workConn, m)
+	default:
 		workConn.Close()
 	}
+}
+
+// inWorkConnOnceRunning hands workConn to the proxy once it runs, and
+// closes it if the proxy does not start within startWait.
+func (pw *Wrapper) inWorkConnOnceRunning(workConn net.Conn, m *msg.StartWorkConn) {
+	for deadline := time.Now().Add(startWait); time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		pw.mu.RLock()
+		pxy, phase := pw.pxy, pw.Phase
+		pw.mu.RUnlock()
+		switch {
+		case pxy != nil && phase == ProxyPhaseRunning:
+			pw.xl.Debugf("start a new work connection after the proxy started")
+			pxy.InWorkConn(workConn, m)
+			return
+		case phase != ProxyPhaseWaitStart:
+			workConn.Close()
+			return
+		}
+	}
+	workConn.Close()
 }
 
 func (pw *Wrapper) GetStatus() *WorkingStatus {
