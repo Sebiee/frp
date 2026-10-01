@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,6 +107,72 @@ func TestHTTPReverseProxyDownOrigin(t *testing.T) {
 		require.Empty(t, rec.Header().Get("Server"), host)
 	}
 	require.Empty(t, NotFoundResponse().Header.Get("Server"))
+}
+
+// A group's endpoint that gives no work connection: its requests go to
+// the next, any method, and the connections that next one gave are kept
+// under its own key. When the first comes back, its share is its own
+// again, not the other's pooled connections.
+func TestHTTPReverseProxyNextEndpoint(t *testing.T) {
+	origins := map[string]string{}
+	servers := map[string]*httptest.Server{}
+	for _, name := range []string{"a", "b"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = io.WriteString(w, name)
+		}))
+		t.Cleanup(srv.Close)
+		servers[name] = srv
+		origins[name] = srv.Listener.Addr().String()
+	}
+	var bDown atomic.Bool
+	var turn atomic.Uint64
+	rp := NewHTTPReverseProxy(HTTPReverseProxyOptions{}, NewRouters())
+	require.NoError(t, rp.Register(RouteConfig{
+		Domain: "group.example.com",
+		ChooseEndpointFn: func() (string, error) {
+			return []string{"a", "b"}[turn.Add(1)%2], nil
+		},
+		CreateConnByEndpointFn: func(endpoint, _ string) (net.Conn, error) {
+			if endpoint == "b" && bDown.Load() {
+				return nil, fmt.Errorf("timeout trying to get work connection")
+			}
+			return net.Dial("tcp", origins[endpoint])
+		},
+		NextEndpointFn: func(endpoint string) (string, bool) {
+			return map[string]string{"a": "b", "b": "a"}[endpoint], true
+		},
+	}))
+	answers := func(method string) map[string]int {
+		got := map[string]int{}
+		for range 6 {
+			rec := httptest.NewRecorder()
+			var body io.Reader
+			if method == http.MethodPost {
+				body = strings.NewReader("body")
+			}
+			req := httptest.NewRequest(method, "http://group.example.com/", body)
+			req.RequestURI = "/"
+			rp.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				got[http.StatusText(rec.Code)]++
+				continue
+			}
+			got[rec.Body.String()]++
+		}
+		return got
+	}
+
+	require.Equal(t, map[string]int{"a": 3, "b": 3}, answers("GET"))
+	// b's tunnel goes, and its work connections with it. A GET on its
+	// pooled connection, closed under it, is retried as before; then b
+	// gives no new one.
+	bDown.Store(true)
+	servers["b"].CloseClientConnections()
+	require.Equal(t, map[string]int{"a": 6}, answers("GET"))
+	require.Equal(t, map[string]int{"a": 6}, answers("POST"))
+	bDown.Store(false)
+	require.Equal(t, map[string]int{"a": 3, "b": 3}, answers("GET"))
 }
 
 func httpProtocols(http1, unencryptedHTTP2 bool) *http.Protocols {

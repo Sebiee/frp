@@ -85,6 +85,7 @@ func (g *HTTPGroup) Register(
 		tmp.CreateConnFn = g.createConn
 		tmp.ChooseEndpointFn = g.chooseEndpoint
 		tmp.CreateConnByEndpointFn = g.createConnByEndpoint
+		tmp.NextEndpointFn = g.nextEndpoint
 		err = g.ctl.vhostRouter.Add(routeConfig.Domain, routeConfig.Location, routeConfig.RouteByHTTPUser, &tmp)
 		if err != nil {
 			return
@@ -176,6 +177,25 @@ func (g *HTTPGroup) chooseEndpoint() (string, error) {
 			group, domain, location, routeByHTTPUser)
 	}
 	return name, nil
+}
+
+// nextEndpoint is the member after endpoint, or the first one when
+// endpoint has left; false when there is no other.
+func (g *HTTPGroup) nextEndpoint(endpoint string) (string, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for i, name := range g.pxyNames {
+		if name == endpoint {
+			if len(g.pxyNames) == 1 {
+				return "", false
+			}
+			return g.pxyNames[(i+1)%len(g.pxyNames)], true
+		}
+	}
+	if len(g.pxyNames) == 0 {
+		return "", false
+	}
+	return g.pxyNames[0], true
 }
 
 func (g *HTTPGroup) createConnByEndpoint(endpoint, remoteAddr string) (net.Conn, error) {

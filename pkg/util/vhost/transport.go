@@ -125,6 +125,7 @@ func (errResponseHeaderTimeout) Temporary() bool { return true }
 
 func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	key := req.URL.Host
+	switched := false
 	for attempt := 0; ; attempt++ {
 		wc := t.get(key)
 		reused := wc != nil
@@ -137,6 +138,13 @@ func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error)
 				stage := StageDial
 				if errors.Is(err, ErrNoRouteFound) {
 					stage = StageRoute
+				} else if next, ok := nextEndpoint(req, switched); ok {
+					// Nothing of the request has been sent: once more on
+					// another endpoint, any request. Its connections are
+					// pooled under its own key.
+					switched = true
+					key = next
+					continue
 				}
 				return nil, &ProxyError{Stage: stage, Err: err}
 			}
@@ -154,6 +162,22 @@ func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		return nil, err
 	}
+}
+
+// nextEndpoint moves req to the endpoint after its own, unless it moved
+// already, and returns that endpoint's pool key.
+func nextEndpoint(req *http.Request, moved bool) (string, bool) {
+	rc, _ := req.Context().Value(RouteConfigKey).(*RouteConfig)
+	info, _ := req.Context().Value(RouteInfoKey).(*RequestRouteInfo)
+	if moved || rc == nil || info == nil || rc.NextEndpointFn == nil {
+		return "", false
+	}
+	next, ok := rc.NextEndpointFn(info.Endpoint)
+	if !ok || next == info.Endpoint {
+		return "", false
+	}
+	info.Endpoint = next
+	return rc.poolHost(next), true
 }
 
 // roundTrip sends req on wc and reads its response. stale is true when

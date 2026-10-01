@@ -34,6 +34,7 @@ import (
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/transport"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/wait"
 	"github.com/fatedier/frp/pkg/util/xlog"
@@ -131,6 +132,13 @@ func (cm *ControlManager) Add(ctl *Control) error {
 				old.runMu.Unlock()
 			}
 			continue
+		}
+		if old != nil && old.ctl.identity != ctl.identity {
+			// A run id is no secret: frps logs it. It only replaces a
+			// control of the same identity.
+			cm.mu.Unlock()
+			old.runMu.Unlock()
+			return fmt.Errorf("run id [%s] belongs to another identity", ctl.runID)
 		}
 
 		id := ControlID(nextControlID.Add(1))
@@ -353,6 +361,21 @@ func (cm *ControlManager) PooledWorkConns() int {
 	return n
 }
 
+// Identities counts the running controls by identity.
+func (cm *ControlManager) Identities() map[string]int {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	n := make(map[string]int)
+	for _, entry := range cm.ctlsByRunID {
+		entry.ctl.lifecycleMu.Lock()
+		if entry.ctl.state == controlStateRunning {
+			n[entry.ctl.identity]++
+		}
+		entry.ctl.lifecycleMu.Unlock()
+	}
+	return n
+}
+
 func (cm *ControlManager) Close() error {
 	cm.mu.Lock()
 	cm.closed = true
@@ -430,7 +453,10 @@ type Control struct {
 
 	// runID never changes during the lifetime of a control. controlID is assigned
 	// once by ControlManager and distinguishes same-runID generations.
-	runID     string
+	runID string
+	// identity is the client's identity outside frp (ServerConfig.Identity),
+	// or "".
+	identity  string
 	controlID ControlID
 	manager   *ControlManager
 
@@ -476,6 +502,7 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, erro
 		poolCount:     poolCount,
 		portsUsedNum:  0,
 		runID:         sessionCtx.LoginMsg.RunID,
+		identity:      netpkg.IdentityFromContext(ctx),
 		state:         controlStateCreated,
 		xl:            xlog.FromContextSafe(ctx),
 		ctx:           ctx,

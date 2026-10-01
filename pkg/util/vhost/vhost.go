@@ -111,6 +111,10 @@ type CreateConnFunc func(remoteAddr string) (net.Conn, error)
 
 type CreateConnByEndpointFunc func(endpoint, remoteAddr string) (net.Conn, error)
 
+// NextEndpointFunc names the endpoint to try when endpoint gave no
+// connection, or false when there is no other.
+type NextEndpointFunc func(endpoint string) (string, bool)
+
 // RouteConfig is the params used to match HTTP requests
 type RouteConfig struct {
 	Domain          string
@@ -125,6 +129,9 @@ type RouteConfig struct {
 	CreateConnFn           CreateConnFunc
 	ChooseEndpointFn       ChooseEndpointFunc
 	CreateConnByEndpointFn CreateConnByEndpointFunc
+	// NextEndpointFn, when set, gives a request whose endpoint gave no
+	// connection one more try on another.
+	NextEndpointFn NextEndpointFunc
 }
 
 // poolHost is the key under which work connections for this route and

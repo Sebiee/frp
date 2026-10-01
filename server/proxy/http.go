@@ -76,6 +76,7 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 	}()
 
 	domains := pxy.buildDomains(pxy.cfg.CustomDomains, pxy.cfg.SubDomain)
+	identity := netpkg.IdentityFromContext(pxy.ctx)
 
 	addrs := make([]string, 0)
 	for _, domain := range domains {
@@ -85,7 +86,18 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 			tmpRouteConfig := routeConfig
 
 			// handle group
-			if pxy.cfg.LoadBalancer.Group != "" {
+			if identity != "" {
+				// The client's identity decides the group, not its config:
+				// its other connections share the route.
+				group := identityGroup(identity, routeConfig)
+				err = pxy.rc.IdentityHTTPGroupCtl.Register(pxy.name, group, identity, routeConfig)
+				if err != nil {
+					return
+				}
+				pxy.closeFuncs = append(pxy.closeFuncs, func() {
+					pxy.rc.IdentityHTTPGroupCtl.UnRegister(pxy.name, group, tmpRouteConfig)
+				})
+			} else if pxy.cfg.LoadBalancer.Group != "" {
 				err = pxy.rc.HTTPGroupCtl.Register(pxy.name, pxy.cfg.LoadBalancer.Group, pxy.cfg.LoadBalancer.GroupKey, routeConfig)
 				if err != nil {
 					return
@@ -103,12 +115,23 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 				})
 			}
 			addrs = append(addrs, util.CanonicalAddr(routeConfig.Domain, pxy.serverCfg.VhostHTTPPort))
+			group := pxy.cfg.LoadBalancer.Group
+			if identity != "" {
+				group = identity
+			}
 			xl.Infof("http proxy listen for host [%s] location [%s] group [%s], routeByHTTPUser [%s]",
-				routeConfig.Domain, routeConfig.Location, pxy.cfg.LoadBalancer.Group, pxy.cfg.RouteByHTTPUser)
+				routeConfig.Domain, routeConfig.Location, group, pxy.cfg.RouteByHTTPUser)
 		}
 	}
 	remoteAddr = strings.Join(addrs, ",")
 	return
+}
+
+// identityGroup names the group of identity's proxies for one route. A
+// group holds one domain, location, and HTTP user, so the route is part
+// of the name; NUL cannot be in any of them.
+func identityGroup(identity string, rc vhost.RouteConfig) string {
+	return strings.Join([]string{identity, rc.Domain, rc.Location, rc.RouteByHTTPUser}, "\x00")
 }
 
 func (pxy *HTTPProxy) GetRealConn(remoteAddr string) (workConn net.Conn, err error) {

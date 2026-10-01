@@ -35,6 +35,10 @@ type ResourceController struct {
 	// HTTP Group Controller
 	HTTPGroupCtl *group.HTTPGroupController
 
+	// HTTP groups of clients' identities (ServerConfig.Identity), apart
+	// from the groups clients name, so a name cannot join one.
+	IdentityHTTPGroupCtl *group.HTTPGroupController
+
 	// HTTPS Group Controller
 	HTTPSGroupCtl *group.HTTPSGroupController
 

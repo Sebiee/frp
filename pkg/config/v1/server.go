@@ -16,6 +16,7 @@ package v1
 
 import (
 	"crypto/tls"
+	"net"
 	"net/http"
 
 	"github.com/samber/lo"
@@ -78,6 +79,19 @@ type ServerConfig struct {
 	// on QUIC, after its handshake; the func it returns, if not nil, when
 	// the connection ends. Not serialized. For in-process embedders.
 	OnQUICConn func(tls.ConnectionState) func() `json:"-"`
+	// Identity, when set, names the client a connection accepted by
+	// HandleListener authenticated as before frp saw it, such as an
+	// embedder's mutual TLS; "" for none. QUICIdentity does the same for
+	// QUIC, from the connection's handshake. A client with an identity
+	// has its HTTP proxies grouped by it: the proxies of one identity for
+	// the same domain, location, and HTTP user share the route, and the
+	// requests are spread across them, whatever load balancer group they
+	// asked for; another identity cannot take the route. Its work
+	// connections must come with the same identity, and a login cannot
+	// replace a control of another identity. Not serialized. For
+	// in-process embedders.
+	Identity     func(net.Conn) string            `json:"-"`
+	QUICIdentity func(tls.ConnectionState) string `json:"-"`
 	// VhostHTTPSPort specifies the port that the server listens for HTTPS
 	// Vhost requests. If this value is 0, the server will not listen for HTTPS
 	// requests.

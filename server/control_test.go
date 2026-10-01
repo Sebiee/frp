@@ -279,6 +279,32 @@ func TestControlManagerRejectsStaleActivateAndRemove(t *testing.T) {
 	require.Equal(t, uint64(newCtl.ID()), info.ControlID)
 }
 
+func TestControlManagerKeepsRunIDsToTheirIdentity(t *testing.T) {
+	clientRegistry := registry.NewClientRegistry()
+	manager := NewControlManager(clientRegistry)
+	metrics := newCountingServerMetrics()
+	owner, _ := newLifecycleTestControl(t, "same-run", "owner", metrics)
+	owner.identity = "node/a"
+	other, _ := newLifecycleTestControl(t, "same-run", "other", metrics)
+	other.identity = "node/b"
+	again, _ := newLifecycleTestControl(t, "same-run", "owner", metrics)
+	again.identity = "node/a"
+
+	mustAddAndActivate(t, manager, owner)
+	require.Empty(t, manager.Identities()) // logging in
+	require.True(t, owner.Start())
+	require.Equal(t, map[string]int{"node/a": 1}, manager.Identities())
+	require.ErrorContains(t, manager.Add(other), "another identity")
+	require.Same(t, owner, currentControlForTest(manager, "same-run"))
+	_, ok := manager.GetByID("same-run")
+	require.True(t, ok)
+
+	// The same identity reconnecting replaces it, as before.
+	require.NoError(t, manager.Add(again))
+	waitForControlDone(t, owner)
+	require.Same(t, again, currentControlForTest(manager, "same-run"))
+}
+
 func TestControlManagerPreservesClientIDConflict(t *testing.T) {
 	clientRegistry := registry.NewClientRegistry()
 	manager := NewControlManager(clientRegistry)

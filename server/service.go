@@ -218,6 +218,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	// Init HTTP group controller
 	svr.rc.HTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
+	svr.rc.IdentityHTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
 
 	// Init TCP mux group controller
 	svr.rc.TCPMuxGroupCtl = group.NewTCPMuxGroupCtl(svr.rc.TCPMuxHTTPConnectMuxer)
@@ -709,6 +710,9 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 		// inject xlog object into net.Conn context
 		xl := xlog.New()
 		ctx := context.Background()
+		if svr.cfg.Identity != nil {
+			ctx = netpkg.WithIdentity(ctx, svr.cfg.Identity(c))
+		}
 
 		c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
 
@@ -766,6 +770,12 @@ func (svr *Service) VhostHTTP() http.Handler {
 	return svr.rc.HTTPReverseProxy
 }
 
+// Clients counts the logged-in clients by identity (Identity,
+// QUICIdentity); those without one count under "".
+func (svr *Service) Clients() map[string]int {
+	return svr.ctlManager.Identities()
+}
+
 // WorkConns counts the HTTP vhost's work connections: pooled, sent ahead
 // by clients and waiting for a request; idle, kept by the proxy after a
 // request for the next; active, carrying a request.
@@ -785,6 +795,10 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 			log.Warnf("quic listener for incoming connections from client closed")
 			return
 		}
+		ctx := context.Background()
+		if svr.cfg.QUICIdentity != nil {
+			ctx = netpkg.WithIdentity(ctx, svr.cfg.QUICIdentity(c.ConnectionState().TLS))
+		}
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn *quic.Conn) {
 			if svr.cfg.OnQUICConn != nil {
@@ -801,7 +815,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 				}
 				go svr.handleConnection(ctx, netpkg.QuicStreamToNetConn(stream, frpConn), false)
 			}
-		}(context.Background(), c)
+		}(ctx, c)
 	}
 }
 
@@ -901,6 +915,10 @@ func (svr *Service) RegisterWorkConn(
 	ctl, exist := svr.ctlManager.GetByID(newMsg.RunID)
 	if !exist {
 		xl.Warnf("no client control found for run id [%s]", newMsg.RunID)
+		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
+	}
+	if id := netpkg.IdentityFromContext(netpkg.NewContextFromConn(workConn)); id != ctl.identity {
+		xl.Warnf("work connection for run id [%s] of another identity", newMsg.RunID)
 		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
 	}
 	if workWireProtocol != ctl.sessionCtx.WireProtocol {
