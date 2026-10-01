@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
+	"syscall"
 	"time"
 
 	libnet "github.com/fatedier/golib/net"
@@ -94,5 +96,101 @@ func deadServerHook(timeout time.Duration) libnet.AfterHookFunc {
 			log.Warnf("dead server timeout on %s: %v", addr, err)
 		}
 		return ctx, c, nil
+	}
+}
+
+// staggerInterval is how often awaitServer starts another connection
+// attempt while none has connected: a SYN sent while the server's machine
+// was still down is lost, and TCP would send it again only after a
+// second.
+const staggerInterval = 250 * time.Millisecond
+
+// awaitServer returns once the server's TCP port accepts a connection, or
+// refuses one, before the client dials it for real. Over tcp, websocket,
+// and wss without a proxy, with frpc's own connector; the dial timeout
+// bounds it.
+func (svr *Service) awaitServer() error {
+	if !svr.ownConnector {
+		return nil // the embedder's connector, which may not dial TCP
+	}
+	t := svr.common.Transport
+	switch t.Protocol {
+	case "tcp", "websocket", "wss":
+	default:
+		return nil
+	}
+	if t.ProxyURL != "" {
+		return nil
+	}
+	addr := net.JoinHostPort(svr.common.ServerAddr, strconv.Itoa(svr.common.ServerPort))
+	var d net.Dialer
+	return awaitPort(svr.ctx, d.DialContext, addr, time.Duration(t.DialServerTimeout)*time.Second)
+}
+
+// awaitPort connects to addr, starting a new attempt every
+// staggerInterval while none has connected, until one does (it is closed
+// at once), one is refused (the machine is up and the port not yet
+// listening: the caller retries soon anyway), or timeout passes.
+func awaitPort(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error),
+	addr string, timeout time.Duration,
+) error {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	// Room for every attempt, so none blocks once nobody is listening.
+	results := make(chan result, int(timeout/staggerInterval)+2)
+	pending := 0
+	attempt := func() {
+		pending++
+		go func() {
+			c, err := dial(ctx, "tcp", addr)
+			results <- result{c, err}
+		}()
+	}
+	// The attempts still out are closed when they finish.
+	defer func() {
+		go func(n int) {
+			for range n {
+				if r := <-results; r.c != nil {
+					r.c.Close()
+				}
+			}
+		}(pending)
+	}()
+	tick := time.NewTicker(staggerInterval)
+	defer tick.Stop()
+	attempt()
+	var last error
+	for {
+		select {
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				r.c.Close()
+				return nil
+			}
+			last = r.err
+			if errors.Is(r.err, syscall.ECONNREFUSED) {
+				return r.err
+			}
+			if pending == 0 && ctx.Err() != nil {
+				return last
+			}
+		case <-tick.C:
+			if ctx.Err() == nil {
+				attempt()
+			}
+		case <-ctx.Done():
+			if last == nil {
+				last = ctx.Err()
+			}
+			return last
+		}
 	}
 }

@@ -157,10 +157,13 @@ type Service struct {
 	cancel context.CancelCauseFunc
 
 	connectorCreator func(context.Context, *v1.ClientCommonConfig) Connector
+	// ownConnector is frpc's own connector, not one an embedder passed.
+	ownConnector     bool
 	handleWorkConnCb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
+	ownConnector := options.ConnectorCreator == nil
 	if err := setServiceOptionsDefault(&options); err != nil {
 		return nil, err
 	}
@@ -211,6 +214,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		configSource:     configSource,
 		storeSource:      storeSource,
 		connectorCreator: options.ConnectorCreator,
+		ownConnector:     ownConnector,
 		handleWorkConnCb: options.HandleWorkConnCb,
 	}
 
@@ -321,6 +325,13 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 
 	loginFunc := func() (bool, error) {
 		xl.Infof("try to connect to server...")
+		if err := svr.awaitServer(); err != nil {
+			xl.Warnf("connect to server error: %v", err)
+			if firstLoginExit {
+				svr.cancel(cancelErr{Err: err})
+			}
+			return false, err
+		}
 		dialer := &controlSessionDialer{
 			ctx:              svr.ctx,
 			common:           svr.common,

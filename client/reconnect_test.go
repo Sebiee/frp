@@ -1,7 +1,12 @@
 package client
 
 import (
+	"context"
 	"errors"
+	"net"
+	"os"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -46,5 +51,61 @@ func TestReconnectBackoff(t *testing.T) {
 	b.lastErr = &LoginRefusedError{Msg: "token doesn't match"}
 	if d = b.Backoff(0, true); d < time.Second {
 		t.Fatalf("refused: %s", d)
+	}
+}
+
+// A first attempt whose SYN was lost does not hold the dial: the next,
+// a stagger later, finds the server.
+func TestAwaitPortStaggers(t *testing.T) {
+	var n atomic.Int32
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		if n.Add(1) == 1 {
+			<-ctx.Done() // lost: TCP would send it again only after a second
+			return nil, ctx.Err()
+		}
+		a, b := net.Pipe()
+		b.Close()
+		return a, nil
+	}
+	start := time.Now()
+	if err := awaitPort(context.Background(), dial, "edge:443", 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > staggerInterval+200*time.Millisecond {
+		t.Fatalf("took %s: the lost attempt held the dial", took)
+	}
+
+	refused := func(context.Context, string, string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	}
+	start = time.Now()
+	if err := awaitPort(context.Background(), refused, "edge:443", 2*time.Second); !errors.Is(err, syscall.ECONNREFUSED) || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("refused: %v after %s", err, time.Since(start))
+	}
+
+	lost := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	start = time.Now()
+	if err := awaitPort(context.Background(), lost, "edge:443", 600*time.Millisecond); err == nil || time.Since(start) > time.Second {
+		t.Fatalf("nothing answers: %v after %s", err, time.Since(start))
+	}
+}
+
+func TestAwaitPortLoopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var d net.Dialer
+	if err := awaitPort(context.Background(), d.DialContext, ln.Addr().String(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	if err := awaitPort(context.Background(), d.DialContext, addr, time.Second); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("closed port: %v", err)
 	}
 }
