@@ -236,6 +236,7 @@ const (
 	ProxyTypeSTCP   ProxyType = "stcp"
 	ProxyTypeXTCP   ProxyType = "xtcp"
 	ProxyTypeSUDP   ProxyType = "sudp"
+	ProxyTypeTCPTLS ProxyType = "tcp-tls"
 )
 
 var proxyConfigTypeMap = map[ProxyType]reflect.Type{
@@ -247,6 +248,7 @@ var proxyConfigTypeMap = map[ProxyType]reflect.Type{
 	ProxyTypeSTCP:   reflect.TypeFor[STCPProxyConfig](),
 	ProxyTypeXTCP:   reflect.TypeFor[XTCPProxyConfig](),
 	ProxyTypeSUDP:   reflect.TypeFor[SUDPProxyConfig](),
+	ProxyTypeTCPTLS: reflect.TypeFor[TCPTLSProxyConfig](),
 }
 
 func NewProxyConfigurerByType(proxyType ProxyType) ProxyConfigurer {
@@ -436,6 +438,42 @@ func (c *TCPMuxProxyConfig) Clone() ProxyConfigurer {
 	out := *c
 	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
 	out.DomainConfig = c.DomainConfig.Clone()
+	return &out
+}
+
+var _ ProxyConfigurer = &TCPTLSProxyConfig{}
+
+// TCPTLSProxyConfig is a TCP service behind a server that ends TLS itself
+// and routes the decrypted stream by the TLS server name: an embedder of
+// frps that sets ServerConfig.EnableTCPTLS. CustomDomains are the exact
+// names. ALPN, when set, are the protocols the server may select; a
+// client that offers none of them is refused.
+type TCPTLSProxyConfig struct {
+	ProxyBaseConfig
+
+	CustomDomains []string `json:"customDomains,omitempty"`
+	ALPN          []string `json:"alpn,omitempty"`
+}
+
+func (c *TCPTLSProxyConfig) MarshalToMsg(m *msg.NewProxy) {
+	c.ProxyBaseConfig.MarshalToMsg(m)
+
+	m.CustomDomains = c.CustomDomains
+	m.ALPN = c.ALPN
+}
+
+func (c *TCPTLSProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
+	c.ProxyBaseConfig.UnmarshalFromMsg(m)
+
+	c.CustomDomains = m.CustomDomains
+	c.ALPN = m.ALPN
+}
+
+func (c *TCPTLSProxyConfig) Clone() ProxyConfigurer {
+	out := *c
+	out.ProxyBaseConfig = c.ProxyBaseConfig.Clone()
+	out.CustomDomains = slices.Clone(c.CustomDomains)
+	out.ALPN = slices.Clone(c.ALPN)
 	return &out
 }
 

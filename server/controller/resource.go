@@ -39,6 +39,12 @@ type ResourceController struct {
 	// from the groups clients name, so a name cannot join one.
 	IdentityHTTPGroupCtl *group.HTTPGroupController
 
+	// Which kind of proxy, http or tcp-tls, holds each name.
+	DomainClaims *group.DomainClaims
+
+	// tcp-tls routes, by name, for the embedder that ends their TLS.
+	TCPTLSRoutes *group.TCPTLSRoutes
+
 	// HTTPS Group Controller
 	HTTPSGroupCtl *group.HTTPSGroupController
 

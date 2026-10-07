@@ -124,6 +124,8 @@ func ValidateProxyConfigurerForClient(c v1.ProxyConfigurer) error {
 		return validateXTCPProxyConfigForClient(v)
 	case *v1.SUDPProxyConfig:
 		return validateSUDPProxyConfigForClient(v)
+	case *v1.TCPTLSProxyConfig:
+		return validateTCPTLSProxyConfigForClient(v)
 	}
 	return errors.New("unknown proxy config type")
 }
@@ -190,6 +192,8 @@ func ValidateProxyConfigurerForServer(c v1.ProxyConfigurer, s *v1.ServerConfig) 
 		return validateXTCPProxyConfigForServer(v, s)
 	case *v1.SUDPProxyConfig:
 		return validateSUDPProxyConfigForServer(v, s)
+	case *v1.TCPTLSProxyConfig:
+		return validateTCPTLSProxyConfigForServer(v, s)
 	default:
 		return errors.New("unknown proxy config type")
 	}
@@ -238,6 +242,55 @@ func validateXTCPProxyConfigForServer(c *v1.XTCPProxyConfig, s *v1.ServerConfig)
 
 func validateSUDPProxyConfigForServer(c *v1.SUDPProxyConfig, s *v1.ServerConfig) error {
 	return nil
+}
+
+// validateTCPTLSProxyConfig checks what both sides check: exact names,
+// usable ALPN values, and a byte stream as it comes, which can be closed
+// one way at a time. Encryption, compression, and a bandwidth limit wrap
+// the stream in a way that cannot, and the server's TLS already protects
+// it; a plugin would replace the local service.
+func validateTCPTLSProxyConfig(c *v1.TCPTLSProxyConfig) error {
+	if len(c.CustomDomains) == 0 {
+		return errors.New("tcp-tls: customDomains should not be empty")
+	}
+	for _, d := range c.CustomDomains {
+		if strings.Contains(d, "*") {
+			return fmt.Errorf("tcp-tls: custom domain [%s]: wildcards are not supported, name each host", d)
+		}
+		if errs := validation.IsDNS1123Subdomain(strings.ToLower(d)); len(errs) > 0 {
+			return fmt.Errorf("tcp-tls: custom domain [%s]: %s", d, strings.Join(errs, "; "))
+		}
+	}
+	for _, p := range c.ALPN {
+		if p == "" || len(p) > 255 {
+			return fmt.Errorf("tcp-tls: alpn [%s]: want 1 to 255 bytes", p)
+		}
+		if p == "acme-tls/1" {
+			return errors.New("tcp-tls: alpn [acme-tls/1] is the ACME challenge's")
+		}
+	}
+	t := c.Transport
+	if t.UseEncryption || t.UseCompression {
+		return errors.New("tcp-tls: useEncryption and useCompression are not supported: the server's TLS protects the stream")
+	}
+	if t.BandwidthLimit.Bytes() > 0 {
+		return errors.New("tcp-tls: bandwidthLimit is not supported")
+	}
+	if c.Plugin.Type != "" {
+		return errors.New("tcp-tls: plugins are not supported")
+	}
+	return nil
+}
+
+func validateTCPTLSProxyConfigForClient(c *v1.TCPTLSProxyConfig) error {
+	return validateTCPTLSProxyConfig(c)
+}
+
+func validateTCPTLSProxyConfigForServer(c *v1.TCPTLSProxyConfig, s *v1.ServerConfig) error {
+	if !s.EnableTCPTLS {
+		return errors.New("type [tcp-tls] not supported: it needs a server that ends TLS itself")
+	}
+	return validateTCPTLSProxyConfig(c)
 }
 
 // ValidateAnnotations validates that a set of annotations are correctly defined.

@@ -92,6 +92,24 @@ type ServerConfig struct {
 	// in-process embedders.
 	Identity     func(net.Conn) string            `json:"-"`
 	QUICIdentity func(tls.ConnectionState) string `json:"-"`
+	// EnableTCPTLS accepts tcp-tls proxies: the embedder ends TLS itself,
+	// finds a server name's route with Service.TCPTLSRoute, and dials it.
+	// Off, frps refuses them. Not serialized. For in-process embedders.
+	EnableTCPTLS bool `json:"-"`
+	// OnTCPTLSDomain, when set, is called after a tcp-tls name gains its
+	// first route (added true) and after it loses its last (added
+	// false). Not serialized. For in-process embedders.
+	OnTCPTLSDomain func(domain string, added bool) `json:"-"`
+	// OnDomainConflict, when set, is told of each proxy refused because
+	// one of its names is the other kind's: an http proxy's name a tcp-tls
+	// route holds, or the reverse. refused and holder are the kinds,
+	// "http" or "tcp-tls". A name is one or the other. Not serialized.
+	// For in-process embedders.
+	OnDomainConflict func(domain, refused, holder string) `json:"-"`
+	// ReservedDomain, when set, names domains no http or tcp-tls proxy
+	// may have, such as the name clients log in on: a proxy for one is
+	// refused. Not serialized. For in-process embedders.
+	ReservedDomain func(domain string) bool `json:"-"`
 	// VhostHTTPSPort specifies the port that the server listens for HTTPS
 	// Vhost requests. If this value is 0, the server will not listen for HTTPS
 	// requests.

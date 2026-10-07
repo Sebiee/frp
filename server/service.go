@@ -220,6 +220,13 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	svr.rc.HTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
 	svr.rc.IdentityHTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
 
+	// A name is an http name or a tcp-tls route; the embedder routes the
+	// tcp-tls ones.
+	svr.rc.DomainClaims = group.NewDomainClaims()
+	svr.rc.DomainClaims.OnConflict = cfg.OnDomainConflict
+	svr.rc.DomainClaims.Reserved = cfg.ReservedDomain
+	svr.rc.TCPTLSRoutes = group.NewTCPTLSRoutes(svr.rc.DomainClaims, cfg.OnTCPTLSDomain)
+
 	// Init TCP mux group controller
 	svr.rc.TCPMuxGroupCtl = group.NewTCPMuxGroupCtl(svr.rc.TCPMuxHTTPConnectMuxer)
 
@@ -768,6 +775,12 @@ func (svr *Service) VhostHTTP() http.Handler {
 		return http.NotFoundHandler()
 	}
 	return svr.rc.HTTPReverseProxy
+}
+
+// TCPTLSRoute is domain's tcp-tls route, if it has one: for an embedder
+// that ends the TLS of its streams (ServerConfig.EnableTCPTLS).
+func (svr *Service) TCPTLSRoute(domain string) (group.TCPTLSRoute, bool) {
+	return svr.rc.TCPTLSRoutes.Get(domain)
 }
 
 // Clients counts the logged-in clients by identity (Identity,

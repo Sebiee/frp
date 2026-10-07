@@ -170,3 +170,7 @@ func (d *Dispatcher) RegisterHandler(msg Message, handler func(Message)) {
 func (d *Dispatcher) Done() chan struct{} {
 	return d.doneCh
 }
+
+// WrappedConn is the connection under c: a message is written to it
+// whole, and the bytes after the last message go to it as they come.
+func (c *Conn) WrappedConn() net.Conn { return c.Conn }

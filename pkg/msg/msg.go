@@ -131,6 +131,9 @@ type NewProxy struct {
 
 	// tcpmux
 	Multiplexer string `json:"multiplexer,omitempty"`
+
+	// tcp-tls
+	ALPN []string `json:"alpn,omitempty"`
 }
 
 type NewProxyResp struct {

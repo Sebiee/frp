@@ -27,6 +27,7 @@ import (
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/vhost"
+	"github.com/fatedier/frp/server/group"
 	"github.com/fatedier/frp/server/metrics"
 )
 
@@ -39,6 +40,8 @@ type HTTPProxy struct {
 	cfg *v1.HTTPProxyConfig
 
 	closeFuncs []func()
+	// releases give up the names' claims, once their routes are gone.
+	releases []func()
 }
 
 func NewHTTPProxy(baseProxy *BaseProxy) Proxy {
@@ -80,6 +83,13 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 
 	addrs := make([]string, 0)
 	for _, domain := range domains {
+		// A name is an http name or a tcp-tls route, not both.
+		release, claimErr := pxy.rc.DomainClaims.Claim(domain, group.DomainKindHTTP)
+		if claimErr != nil {
+			err = claimErr
+			return
+		}
+		pxy.releases = append(pxy.releases, release)
 		routeConfig.Domain = domain
 		for _, location := range locations {
 			routeConfig.Location = location
@@ -185,5 +195,8 @@ func (pxy *HTTPProxy) Close() {
 	pxy.BaseProxy.Close()
 	for _, closeFn := range pxy.closeFuncs {
 		closeFn()
+	}
+	for _, release := range pxy.releases {
+		release()
 	}
 }
