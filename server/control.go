@@ -735,7 +735,7 @@ func (ctl *Control) closeProxy(pxy proxy.Proxy) {
 	if ctl.identity != "" {
 		ctl.manager.holdings.remove(ctl.identity, proxyNames(pxy.GetConfigurer(), ctl.sessionCtx.ServerCfg.SubDomainHost))
 	}
-	ctl.sessionCtx.PxyManager.Del(pxy.GetName())
+	ctl.sessionCtx.PxyManager.Del(ctl.identity, pxy.GetName())
 	ctl.serverMetrics.CloseProxy(pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type)
 
 	notifyContent := &plugin.CloseProxyContent{
@@ -958,7 +958,7 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 		}()
 	}
 
-	if ctl.sessionCtx.PxyManager.Exist(pxyMsg.ProxyName) {
+	if ctl.sessionCtx.PxyManager.Exist(ctl.identity, pxyMsg.ProxyName) {
 		err = fmt.Errorf("proxy [%s] already exists", pxyMsg.ProxyName)
 		return
 	}
@@ -973,7 +973,7 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 		}
 	}()
 
-	err = ctl.sessionCtx.PxyManager.Add(pxyMsg.ProxyName, pxy)
+	err = ctl.sessionCtx.PxyManager.Add(ctl.identity, pxyMsg.ProxyName, pxy)
 	if err != nil {
 		return
 	}

@@ -569,45 +569,52 @@ func NewProxy(ctx context.Context, options *Options) (pxy Proxy, err error) {
 }
 
 type Manager struct {
-	// proxies indexed by proxy name
-	pxys map[string]Proxy
+	// proxies indexed by client identity and proxy name
+	pxys map[managerKey]Proxy
 
 	mu sync.RWMutex
 }
 
+// managerKey names a proxy: a proxy name is the client's own choice, so
+// each client identity (ServerConfig.Identity) has its own.
+type managerKey struct{ identity, name string }
+
 func NewManager() *Manager {
 	return &Manager{
-		pxys: make(map[string]Proxy),
+		pxys: make(map[managerKey]Proxy),
 	}
 }
 
-func (pm *Manager) Add(name string, pxy Proxy) error {
+func (pm *Manager) Add(identity, name string, pxy Proxy) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	if _, ok := pm.pxys[name]; ok {
+	k := managerKey{identity, name}
+	if _, ok := pm.pxys[k]; ok {
 		return fmt.Errorf("proxy name [%s] is already in use", name)
 	}
 
-	pm.pxys[name] = pxy
+	pm.pxys[k] = pxy
 	return nil
 }
 
-func (pm *Manager) Exist(name string) bool {
+func (pm *Manager) Exist(identity, name string) bool {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	_, ok := pm.pxys[name]
+	_, ok := pm.pxys[managerKey{identity, name}]
 	return ok
 }
 
-func (pm *Manager) Del(name string) {
+func (pm *Manager) Del(identity, name string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	delete(pm.pxys, name)
+	delete(pm.pxys, managerKey{identity, name})
 }
 
+// GetByName is the proxy named name of a client without an identity: the
+// dashboard names proxies by name alone.
 func (pm *Manager) GetByName(name string) (pxy Proxy, ok bool) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	pxy, ok = pm.pxys[name]
+	pxy, ok = pm.pxys[managerKey{name: name}]
 	return
 }

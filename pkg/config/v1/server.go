@@ -90,11 +90,12 @@ type ServerConfig struct {
 	// requests are spread across them, whatever load balancer group they
 	// asked for. A name is one identity's: another cannot add a location
 	// or an HTTP user to it, nor have it as a tcp-tls route, until 10
-	// minutes after the identity's last proxy for it left. Its work
-	// connections must come with the same identity, and a login cannot
-	// replace a control of another identity. It may register http and
-	// tcp-tls proxies only, and opens no visitor connections and no NAT
-	// holes. frps grants its streams 256 KiB receive windows, not 6 MiB
+	// minutes after the identity's last proxy for it left. Its proxy
+	// names are its own: another identity may have a proxy of the same
+	// name. Its work connections must come with the same identity, and a
+	// login cannot replace a control of another identity. It may register
+	// http and tcp-tls proxies only, and opens no visitor connections and
+	// no NAT holes. frps grants its streams 256 KiB receive windows, not 6 MiB
 	// (on QUIC, all clients' when QUICIdentity is set). Its login's text
 	// fields are short and printable (validation.ValidateLoginField), and
 	// its client registry entry, keyed by run ID, goes when it leaves. One
