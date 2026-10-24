@@ -226,6 +226,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	// name never goes to another identity's wildcard.
 	svr.rc.DomainClaims = group.NewDomainClaims()
 	svr.rc.DomainClaims.OnConflict = cfg.OnDomainConflict
+	svr.rc.DomainClaims.OnOwned = cfg.OnDomainOwned
 	svr.rc.DomainClaims.Reserved = cfg.ReservedDomain
 	svr.httpVhostRouter.Owner = svr.rc.DomainClaims.Owner
 	svr.rc.TCPTLSRoutes = group.NewTCPTLSRoutes(svr.rc.DomainClaims, cfg.OnTCPTLSDomain)
@@ -816,6 +817,30 @@ func (svr *Service) VhostHTTP() http.Handler {
 // that ends the TLS of its streams (ServerConfig.EnableTCPTLS).
 func (svr *Service) TCPTLSRoute(domain string) (group.TCPTLSRoute, bool) {
 	return svr.rc.TCPTLSRoutes.Get(domain)
+}
+
+// SetDomainGrace sets how long a name stays its client identity's
+// (ServerConfig.Identity) after the identity's last proxy for it left,
+// 10 minutes until set: another identity is refused it meanwhile. Names
+// in their grace follow it too, from when their last proxy left.
+func (svr *Service) SetDomainGrace(grace time.Duration) {
+	svr.rc.DomainClaims.SetGrace(grace)
+}
+
+// BindDomain holds name for the client identity as if the identity's
+// last proxy for it had just left: another identity is refused it for
+// the grace, and the identity has it back. It is for an embedder that
+// restarts frps with the names its clients had, before they log in. It
+// refuses a name a proxy could not have, and one another identity holds
+// or held within the grace.
+func (svr *Service) BindDomain(name, identity string) error {
+	return svr.rc.DomainClaims.Bind(name, identity)
+}
+
+// DomainOwner is the client identity whose proxies hold name, as frps
+// names it (OnDomain), or held it within the grace.
+func (svr *Service) DomainOwner(name string) (identity string, ok bool) {
+	return svr.rc.DomainClaims.Owner(name)
 }
 
 // Clients counts the logged-in clients by identity (Identity,

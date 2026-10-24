@@ -89,8 +89,9 @@ type ServerConfig struct {
 	// the same domain, location, and HTTP user share the route, and the
 	// requests are spread across them, whatever load balancer group they
 	// asked for. A name is one identity's: another cannot add a location
-	// or an HTTP user to it, nor have it as a tcp-tls route, until 10
-	// minutes after the identity's last proxy for it left. Its proxy
+	// or an HTTP user to it, nor have it as a tcp-tls route, until the
+	// grace is up after the identity's last proxy for it left: 10
+	// minutes, or as Service.SetDomainGrace sets. Its proxy
 	// names and run IDs are its own: another identity's proxy or client
 	// of the same name or run ID is another, which neither replaces nor
 	// refuses its. Its work connections must come with the same identity.
@@ -121,6 +122,12 @@ type ServerConfig struct {
 	// "http" or "tcp-tls". A name is one or the other. Not serialized.
 	// For in-process embedders.
 	OnDomainConflict func(domain, refused, holder string) `json:"-"`
+	// OnDomainOwned, when set, is told of each proxy refused because one
+	// of its names is another client identity's (Identity), which holds
+	// it or held it within the grace (Service.SetDomainGrace). refused
+	// and owner are the identities. Not serialized. For in-process
+	// embedders.
+	OnDomainOwned func(domain, refused, owner string) `json:"-"`
 	// ReservedDomain, when set, names domains no http or tcp-tls proxy
 	// may have, such as the name clients log in on: a proxy for one is
 	// refused. Not serialized. For in-process embedders.

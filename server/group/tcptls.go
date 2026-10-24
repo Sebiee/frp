@@ -29,7 +29,7 @@ func (e *DomainClaimedError) Error() string {
 }
 
 // DomainOwnedError refuses a proxy whose name another client identity
-// holds, or held within DomainClaims.Grace.
+// holds, or held within the grace (DomainClaims.SetGrace).
 type DomainOwnedError struct {
 	Domain string
 }
@@ -43,22 +43,25 @@ func (e *DomainOwnedError) Error() string {
 // any proxy has it: all of a name's locations, HTTP users and routes are
 // one identity's. The first to claim a name keeps it; another identity,
 // and the other kind, are refused until the last claim is released.
-// Another identity is refused for Grace after that too.
+// Another identity is refused for the grace after that too.
 type DomainClaims struct {
 	// OnConflict, when set, is told of each claim refused because the
 	// other kind holds the name.
 	OnConflict func(domain, refused, holder string)
+	// OnOwned, when set, is told of each claim refused because another
+	// identity, owner, holds the name or held it within the grace.
+	OnOwned func(domain, refused, owner string)
 	// Reserved, when set, are names no proxy may claim: an embedder's
 	// own, such as the name its clients log in on.
 	Reserved func(domain string) bool
-	// Grace is how long a name stays its identity's after its last claim
-	// is released, as either kind: the identity's client reconnecting,
-	// or restarting, finds its names its own. NewDomainClaims sets 10
-	// minutes. An identity has at most maxGraced names in their grace; a
-	// name it releases beyond that is free at once.
-	Grace time.Duration
 
-	mu     sync.RWMutex
+	mu sync.RWMutex
+	// grace is how long a name stays its identity's after its last
+	// claim is released, as either kind: the identity's client
+	// reconnecting, or restarting, finds its names its own. An identity
+	// has at most maxGraced names in their grace; a name it releases
+	// beyond that is free at once.
+	grace  time.Duration
 	m      map[string]*domainClaim
 	graced map[string]int // each identity's names in their grace
 }
@@ -71,27 +74,41 @@ type domainClaim struct {
 	identity string
 	kind     string
 	n        int
-	// With n 0, until is when the name stops being identity's, and
-	// expiry forgets it then.
-	until  time.Time
-	expiry *time.Timer
+	// With n 0, the name is identity's for the grace from released,
+	// and expiry forgets it then.
+	released time.Time
+	expiry   *time.Timer
 }
 
-// held is whether cl's identity still holds the name at now.
-func (cl *domainClaim) held(now time.Time) bool {
-	return cl.n > 0 || now.Before(cl.until)
+// heldLocked is whether cl's identity still holds its name.
+func (c *DomainClaims) heldLocked(cl *domainClaim) bool {
+	return cl.n > 0 || time.Since(cl.released) < c.grace
 }
 
+// NewDomainClaims makes the claims, with a grace of 10 minutes.
 func NewDomainClaims() *DomainClaims {
-	return &DomainClaims{Grace: 10 * time.Minute, m: make(map[string]*domainClaim), graced: make(map[string]int)}
+	return &DomainClaims{grace: 10 * time.Minute, m: make(map[string]*domainClaim), graced: make(map[string]int)}
+}
+
+// SetGrace sets the grace, for the names in their grace too: each stays
+// its identity's for grace from when its last claim was released.
+func (c *DomainClaims) SetGrace(grace time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.grace = grace
+	for _, cl := range c.m {
+		if cl.n == 0 {
+			cl.expiry.Reset(grace - time.Since(cl.released))
+		}
+	}
 }
 
 // Claim holds domain, as name, for kind and the client identity until
 // release is called. name is its canonical form (canonicalDomain), the
 // one to route by. It refuses a name that has none, a reserved one, one
 // the other kind holds, with a *DomainClaimedError, and one another
-// identity holds or held within Grace, with a *DomainOwnedError. A nil
-// c claims nothing.
+// identity holds or held within the grace, with a *DomainOwnedError. A
+// nil c claims nothing.
 func (c *DomainClaims) Claim(domain, kind, identity string) (name string, release func(), err error) {
 	name, err = canonicalDomain(domain, kind)
 	if err != nil {
@@ -104,11 +121,7 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 		return "", nil, fmt.Errorf("domain [%s] is reserved", name)
 	}
 	c.mu.Lock()
-	cl := c.m[name]
-	if cl != nil && !cl.held(time.Now()) {
-		c.forget(name, cl)
-		cl = nil
-	}
+	cl := c.currentLocked(name)
 	switch {
 	case cl == nil:
 		cl = &domainClaim{identity: identity}
@@ -121,7 +134,11 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 		}
 		return "", nil, &DomainClaimedError{Domain: name, Refused: kind, Holder: holder}
 	case cl.identity != identity:
+		owner := cl.identity
 		c.mu.Unlock()
+		if c.OnOwned != nil {
+			c.OnOwned(name, identity, owner)
+		}
 		return "", nil, &DomainOwnedError{Domain: name}
 	case cl.n == 0:
 		c.ungrace(identity)
@@ -133,22 +150,69 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 	return name, func() { once.Do(func() { c.release(name, cl) }) }, nil
 }
 
+// Bind holds domain for identity as if its last claim had just been
+// released: another identity is refused it for the grace. It is for an
+// embedder restoring, after frps restarted, the names its clients had.
+// It refuses what Claim refuses, but for a name identity holds now,
+// which stays held. With no grace, or past maxGraced, it holds nothing.
+func (c *DomainClaims) Bind(domain, identity string) error {
+	name, err := canonicalDomain(domain, DomainKindHTTP)
+	if err != nil {
+		return err
+	}
+	if c.Reserved != nil && c.Reserved(name) {
+		return fmt.Errorf("domain [%s] is reserved", name)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cl := c.currentLocked(name)
+	switch {
+	case cl == nil:
+		cl = &domainClaim{identity: identity}
+		c.m[name] = cl
+	case cl.identity != identity:
+		return &DomainOwnedError{Domain: name}
+	case cl.n > 0:
+		return nil
+	default:
+		c.ungrace(identity)
+	}
+	c.startGraceLocked(name, cl)
+	return nil
+}
+
+// currentLocked is name's claim, forgetting one whose grace is up.
+func (c *DomainClaims) currentLocked(name string) *domainClaim {
+	cl := c.m[name]
+	if cl != nil && !c.heldLocked(cl) {
+		c.forget(name, cl)
+		return nil
+	}
+	return cl
+}
+
 func (c *DomainClaims) release(name string, cl *domainClaim) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cl.n--; cl.n > 0 || c.m[name] != cl {
 		return
 	}
-	if c.Grace <= 0 || c.graced[cl.identity] >= maxGraced {
+	c.startGraceLocked(name, cl)
+}
+
+// startGraceLocked keeps name, which has no claim now, cl's identity's
+// for the grace, or frees it at once.
+func (c *DomainClaims) startGraceLocked(name string, cl *domainClaim) {
+	if c.grace <= 0 || c.graced[cl.identity] >= maxGraced {
 		delete(c.m, name)
 		return
 	}
 	c.graced[cl.identity]++
-	cl.until = time.Now().Add(c.Grace)
+	cl.released = time.Now()
 	if cl.expiry == nil {
-		cl.expiry = time.AfterFunc(c.Grace, func() { c.expire(name, cl) })
+		cl.expiry = time.AfterFunc(c.grace, func() { c.expire(name, cl) })
 	} else {
-		cl.expiry.Reset(c.Grace)
+		cl.expiry.Reset(c.grace)
 	}
 }
 
@@ -156,7 +220,7 @@ func (c *DomainClaims) release(name string, cl *domainClaim) {
 func (c *DomainClaims) expire(name string, cl *domainClaim) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.m[name] == cl && !cl.held(time.Now()) {
+	if c.m[name] == cl && !c.heldLocked(cl) {
 		c.forget(name, cl)
 	}
 }
@@ -175,11 +239,11 @@ func (c *DomainClaims) ungrace(identity string) {
 }
 
 // Owner is the client identity name belongs to: the one whose proxies
-// hold it, or held it within Grace.
+// hold it, or held it within the grace.
 func (c *DomainClaims) Owner(name string) (identity string, ok bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if cl := c.m[name]; cl != nil && cl.held(time.Now()) {
+	if cl := c.m[name]; cl != nil && c.heldLocked(cl) {
 		return cl.identity, true
 	}
 	return "", false
