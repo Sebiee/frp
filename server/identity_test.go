@@ -15,15 +15,19 @@
 package server
 
 import (
+	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -62,16 +66,44 @@ func (l *connListener) Close() error {
 
 func (*connListener) Addr() net.Addr { return lifecycleTestAddr("embedder") }
 
+// stream is a client's stream to frps, on yamux or QUIC.
+type stream interface {
+	io.ReadWriteCloser
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
+
+// session is a client's connection to frps, carrying its streams.
+type session interface{ open() (stream, error) }
+
+type yamuxSession struct{ *yamux.Session }
+
+func (s yamuxSession) open() (stream, error) { return s.OpenStream() }
+
+type quicSession struct{ *quic.Conn }
+
+func (s quicSession) open() (stream, error) { return s.OpenStreamSync(context.Background()) }
+
+func freePort(t *testing.T, network string) int {
+	t.Helper()
+	if network == "udp" {
+		c, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer c.Close()
+		return c.LocalAddr().(*net.UDPAddr).Port
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
 // identityServer runs frps for an embedder that names its clients
 // (ServerConfig.Identity), and returns how a client of an identity, ""
 // for none, opens a session to it.
-func identityServer(t *testing.T) func(identity string) *yamux.Session {
+func identityServer(t *testing.T) func(identity string) session {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close())
-
+	port := freePort(t, "tcp")
 	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: port, VhostHTTPPort: port, EnableTCPTLS: true}
 	cfg.Identity = func(c net.Conn) string {
 		if ic, ok := c.(*identityConn); ok {
@@ -89,29 +121,55 @@ func identityServer(t *testing.T) func(identity string) *yamux.Session {
 		_ = svr.Close()
 	})
 
-	return func(identity string) *yamux.Session {
+	return func(identity string) session {
 		c, s := net.Pipe()
 		ln.conns <- &identityConn{Conn: s, identity: identity}
 		sess, err := yamux.Client(c, nil)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sess.Close() })
-		return sess
+		return yamuxSession{sess}
+	}
+}
+
+// quicServer runs frps on QUIC, naming every client node/a when named
+// (ServerConfig.QUICIdentity), and returns how a client connects to it.
+func quicServer(t *testing.T, named bool) func() session {
+	t.Helper()
+	port := freePort(t, "udp")
+	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: freePort(t, "tcp"), QUICBindAddr: "127.0.0.1", QUICBindPort: port}
+	if named {
+		cfg.QUICIdentity = func(tls.ConnectionState) string { return "node/a" }
+	}
+	require.NoError(t, cfg.Complete())
+	svr, err := NewService(cfg)
+	require.NoError(t, err)
+	go svr.HandleQUICListener(svr.quicListener)
+	t.Cleanup(func() { _ = svr.Close() })
+
+	return func() session {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c, err := quic.DialAddr(ctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+			&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"frp"}}, &quic.Config{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.CloseWithError(0, "") })
+		return quicSession{c}
 	}
 }
 
 // testClient is a client logged in on a session, with its control.
 type testClient struct {
 	t      *testing.T
-	sess   *yamux.Session
-	stream *yamux.Stream
+	sess   session
+	stream stream
 	ctl    io.ReadWriter // encrypted after the login
 	runID  string
 }
 
 // login logs in on sess with m, and returns frps's refusal if it refused.
-func login(t *testing.T, sess *yamux.Session, m msg.Login) (*testClient, error) {
+func login(t *testing.T, sess session, m msg.Login) (*testClient, error) {
 	t.Helper()
-	s, err := sess.OpenStream()
+	s, err := sess.open()
 	require.NoError(t, err)
 	ts := time.Now().Unix()
 	m.PrivilegeKey, m.Timestamp = util.GetAuthKey("", ts), ts
@@ -165,9 +223,9 @@ func (c *testClient) newProxy(m msg.NewProxy) error {
 
 // visit opens a visitor connection to proxy name on sess, as the client
 // of runID, and returns frps's refusal if it refused.
-func visit(t *testing.T, sess *yamux.Session, runID, name, sk string) error {
+func visit(t *testing.T, sess session, runID, name, sk string) error {
 	t.Helper()
-	s, err := sess.OpenStream()
+	s, err := sess.open()
 	require.NoError(t, err)
 	defer s.Close()
 	ts := time.Now().Unix()
@@ -179,6 +237,61 @@ func visit(t *testing.T, sess *yamux.Session, runID, name, sk string) error {
 		return errors.New(resp.Error)
 	}
 	return nil
+}
+
+// pooledWorkConn opens a work connection for c on sess, and writes 1 MiB
+// on it while it waits, unread, in c's pool: frps takes what its stream
+// window grants.
+func (c *testClient) pooledWorkConn(sess session) (int, error) {
+	c.t.Helper()
+	s, err := sess.open()
+	require.NoError(c.t, err)
+	defer s.Close()
+	ts := time.Now().Unix()
+	require.NoError(c.t, msg.WriteMsg(s, &msg.NewWorkConn{RunID: c.runID, PrivilegeKey: util.GetAuthKey("", ts), Timestamp: ts}))
+	_ = s.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	return s.Write(make([]byte, 1<<20))
+}
+
+func requireTimeout(t *testing.T, err error) {
+	t.Helper()
+	var ne net.Error
+	require.True(t, errors.As(err, &ne) && ne.Timeout(), "err %v, want a write that times out", err)
+}
+
+func TestIdentityClientsGetSmallStreamWindows(t *testing.T) {
+	const window = 256 << 10
+	t.Run("yamux", func(t *testing.T) {
+		dial := identityServer(t)
+		node := dial("node/a")
+		c, err := login(t, node, msg.Login{})
+		require.NoError(t, err)
+		n, err := c.pooledWorkConn(node)
+		requireTimeout(t, err)
+		require.LessOrEqual(t, n, window)
+
+		plain := dial("")
+		c, err = login(t, plain, msg.Login{})
+		require.NoError(t, err)
+		n, err = c.pooledWorkConn(plain)
+		require.NoError(t, err)
+		require.Equal(t, 1<<20, n, "a client with no identity keeps frp's 6 MiB window")
+	})
+	t.Run("quic", func(t *testing.T) {
+		node := quicServer(t, true)()
+		c, err := login(t, node, msg.Login{})
+		require.NoError(t, err)
+		n, err := c.pooledWorkConn(node)
+		requireTimeout(t, err)
+		require.LessOrEqual(t, n, window)
+
+		plain := quicServer(t, false)()
+		c, err = login(t, plain, msg.Login{})
+		require.NoError(t, err)
+		n, err = c.pooledWorkConn(plain)
+		requireTimeout(t, err)
+		require.Greater(t, n, window, "a server that names no QUIC client keeps quic-go's windows")
+	})
 }
 
 func TestIdentityClientsRegisterOnlyHTTPAndTCPTLSProxies(t *testing.T) {
