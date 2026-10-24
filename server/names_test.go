@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -20,11 +21,18 @@ import (
 
 func newNamesTestService(t *testing.T, onDomain func(domain string, added bool)) *Service {
 	t.Helper()
+	return newNamesTestServiceWith(t, func(cfg *v1.ServerConfig) { cfg.OnDomain = onDomain })
+}
+
+// newNamesTestServiceWith runs frps with the embedder's settings set.
+func newNamesTestServiceWith(t *testing.T, set func(*v1.ServerConfig)) *Service {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	port := l.Addr().(*net.TCPAddr).Port
 	require.NoError(t, l.Close())
-	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: port, VhostHTTPPort: port, EnableTCPTLS: true, OnDomain: onDomain}
+	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: port, VhostHTTPPort: port, EnableTCPTLS: true}
+	set(cfg)
 	require.NoError(t, cfg.Complete())
 	svr, err := NewService(cfg)
 	require.NoError(t, err)
@@ -224,4 +232,53 @@ func TestLocationsAreBounded(t *testing.T) {
 
 	_, err = publish(t, svr, "node", httpProxy("clean", "d.example.com", "", "", "/", "/api/", "/static"))
 	require.NoError(t, err)
+}
+
+// An embedder restoring, after frps restarted, the names its clients
+// had binds each to its client identity before they log in: another
+// identity is refused it for the grace, and its owner has it back.
+func TestEmbedderRestoresNames(t *testing.T) {
+	type refusal struct{ domain, refused, owner string }
+	var refusals []refusal
+	svr := newNamesTestServiceWith(t, func(cfg *v1.ServerConfig) {
+		cfg.ReservedDomain = func(d string) bool { return d == "tunnel.example.com" }
+		cfg.OnDomainOwned = func(d, refused, owner string) { refusals = append(refusals, refusal{d, refused, owner}) }
+	})
+	require.NoError(t, svr.BindDomain("app.example.com", "victim"))
+	require.NoError(t, svr.BindDomain("db.example.com", "victim"))
+	require.Error(t, svr.BindDomain("app.example.com", "attacker"))
+	require.Error(t, svr.BindDomain("tunnel.example.com", "victim"))
+	owner, ok := svr.DomainOwner("app.example.com")
+	require.True(t, ok)
+	require.Equal(t, "victim", owner)
+	_, ok = svr.DomainOwner("other.example.com")
+	require.False(t, ok)
+
+	_, err := publish(t, svr, "attacker", httpProxy("web", "app.example.com", ""))
+	require.Error(t, err)
+	_, err = publish(t, svr, "attacker", tcpTLSProxy("db", "db.example.com"))
+	require.Error(t, err)
+	require.Equal(t, []refusal{{"app.example.com", "attacker", "victim"}, {"db.example.com", "attacker", "victim"}}, refusals)
+
+	_, err = publish(t, svr, "victim", httpProxy("web", "app.example.com", ""))
+	require.NoError(t, err)
+	require.Equal(t, "victim", reach(svr, "app.example.com", "/", ""))
+}
+
+// The embedder sets the grace, and may change it while names are in
+// theirs: each follows it.
+func TestEmbedderSetsTheGrace(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	leave, err := publish(t, svr, "victim", httpProxy("web", "app.example.com", ""))
+	require.NoError(t, err)
+	leave()
+	_, err = publish(t, svr, "attacker", httpProxy("web", "app.example.com", ""))
+	require.Error(t, err, "10 minutes until set")
+
+	time.Sleep(20 * time.Millisecond)
+	svr.SetDomainGrace(10 * time.Millisecond)
+	_, err = publish(t, svr, "attacker", httpProxy("web", "app.example.com", ""))
+	require.NoError(t, err, "a name past the new grace is free")
+	_, ok := svr.DomainOwner("app.example.com")
+	require.True(t, ok)
 }

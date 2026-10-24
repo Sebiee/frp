@@ -147,11 +147,14 @@ func TestDomainClaimsOneIdentity(t *testing.T) {
 	c := NewDomainClaims()
 	var conflicts int
 	c.OnConflict = func(string, string, string) { conflicts++ }
+	type refusal struct{ domain, refused, owner string }
+	var refusals []refusal
+	c.OnOwned = func(d, refused, owner string) { refusals = append(refusals, refusal{d, refused, owner}) }
 	var owned *DomainOwnedError
 
 	_, rel1, err := c.Claim("app.example.com", DomainKindHTTP, "node/1")
 	require.NoError(err)
-	_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+	_, _, err = c.Claim("App.example.com", DomainKindHTTP, "node/2")
 	require.ErrorAs(err, &owned)
 	require.Equal("app.example.com", owned.Domain)
 	_, _, err = c.Claim("app.example.com", DomainKindHTTP, "")
@@ -164,6 +167,14 @@ func TestDomainClaimsOneIdentity(t *testing.T) {
 	_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
 	require.ErrorAs(err, &owned, "while any claim of node/1 is held")
 	rel2()
+	_, _, err = c.Claim("app.example.com", DomainKindTCPTLS, "node/2")
+	require.ErrorAs(err, &owned, "and within its grace")
+	require.Equal([]refusal{
+		{"app.example.com", "node/2", "node/1"},
+		{"app.example.com", "", "node/1"},
+		{"app.example.com", "node/2", "node/1"},
+		{"app.example.com", "node/2", "node/1"},
+	}, refusals)
 }
 
 // A name stays its identity's for the grace after its last claim goes,
@@ -244,6 +255,91 @@ func TestDomainClaimsGraceIsBounded(t *testing.T) {
 	})
 }
 
+// The grace follows SetGrace, for the names in their grace too: a name
+// stays its identity's for the grace from when its last claim went.
+func TestDomainClaimsSetGrace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		c := NewDomainClaims()
+		var owned *DomainOwnedError
+		_, rel, err := c.Claim("app.example.com", DomainKindHTTP, "node/1")
+		require.NoError(err)
+		rel()
+		time.Sleep(5 * time.Minute)
+		c.SetGrace(time.Hour)
+		time.Sleep(50 * time.Minute)
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+		require.ErrorAs(err, &owned)
+		owner, ok := c.Owner("app.example.com")
+		require.True(ok)
+		require.Equal("node/1", owner)
+
+		c.SetGrace(30 * time.Minute)
+		synctest.Wait()
+		_, ok = c.Owner("app.example.com")
+		require.False(ok, "its grace is up")
+		c.mu.Lock()
+		require.Empty(c.m, "and it is forgotten")
+		require.Empty(c.graced)
+		c.mu.Unlock()
+
+		c.SetGrace(0)
+		_, rel, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+		require.NoError(err)
+		rel()
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/3")
+		require.NoError(err, "no grace: free at once")
+	})
+}
+
+// Bind holds a name for an identity as if its last claim had just gone,
+// for an embedder restoring the names it had before frps restarted.
+func TestDomainClaimsBind(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		c := NewDomainClaims()
+		c.Reserved = func(d string) bool { return d == "tunnel.example.com" }
+		var owned *DomainOwnedError
+
+		require.NoError(c.Bind("App.example.com", "node/1"))
+		require.NoError(c.Bind("*.example.org", "node/1"))
+		owner, ok := c.Owner("app.example.com")
+		require.True(ok)
+		require.Equal("node/1", owner)
+		require.ErrorAs(c.Bind("app.example.com", "node/2"), &owned)
+		require.Error(c.Bind("app.example.com.", "node/1"))
+		require.ErrorContains(c.Bind("tunnel.example.com", "node/1"), "reserved")
+		for _, kind := range []string{DomainKindHTTP, DomainKindTCPTLS} {
+			_, _, err := c.Claim("app.example.com", kind, "node/2")
+			require.ErrorAs(err, &owned, kind)
+		}
+
+		time.Sleep(5 * time.Minute)
+		_, rel, err := c.Claim("app.example.com", DomainKindTCPTLS, "node/1")
+		require.NoError(err, "its identity has it, as either kind")
+		require.NoError(c.Bind("app.example.com", "node/1"), "held, it stays held")
+		time.Sleep(time.Hour)
+		_, _, err = c.Claim("app.example.com", DomainKindTCPTLS, "node/2")
+		require.ErrorAs(err, &owned)
+		rel()
+
+		time.Sleep(10 * time.Minute)
+		synctest.Wait()
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+		require.NoError(err, "the grace is up")
+		_, _, err = c.Claim("*.example.org", DomainKindHTTP, "node/2")
+		require.NoError(err)
+		c.mu.Lock()
+		require.Empty(c.graced)
+		c.mu.Unlock()
+
+		c.SetGrace(0)
+		require.NoError(c.Bind("db.example.com", "node/1"))
+		_, _, err = c.Claim("db.example.com", DomainKindTCPTLS, "node/2")
+		require.NoError(err, "no grace: Bind holds nothing")
+	})
+}
+
 // A name is claimed and routed in one spelling: frps and its embedder
 // never fold two claims into one name, or one into another's.
 func TestDomainClaimsCanonicalNames(t *testing.T) {
@@ -315,7 +411,7 @@ func TestTCPTLSRoutesALPNInAnyOrder(t *testing.T) {
 // that took the name since.
 func TestTCPTLSRouteDialStaysInItsGroup(t *testing.T) {
 	claims := NewDomainClaims()
-	claims.Grace = 0
+	claims.SetGrace(0)
 	r := NewTCPTLSRoutes(claims, nil)
 	var calls []string
 	un, err := r.Register("a", "node/1", "db.example.com", nil, dialer("a", &calls, nil))
