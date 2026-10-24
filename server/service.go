@@ -880,6 +880,11 @@ func (svr *Service) RegisterControl(
 	}
 
 	ctx := netpkg.NewContextFromConn(ctlConn)
+	if netpkg.IdentityFromContext(ctx) != "" {
+		if err := validateLogin(loginMsg); err != nil {
+			return nil, fmt.Errorf("invalid login: %w", err)
+		}
+	}
 	xl := xlog.FromContextSafe(ctx)
 	xl.AppendPrefix(loginMsg.RunID)
 	ctx = xlog.NewContext(ctx, xl)
@@ -927,6 +932,19 @@ func (svr *Service) RegisterControl(
 	}
 
 	return ctl, nil
+}
+
+// validateLogin bounds what a client with an identity says of itself:
+// frps logs it, and keeps it while the client is logged in.
+func validateLogin(m *msg.Login) error {
+	for _, f := range []struct{ kind, value string }{
+		{"version", m.Version}, {"hostname", m.Hostname}, {"os", m.Os}, {"arch", m.Arch}, {"user", m.User},
+	} {
+		if err := validation.ValidateLoginField(f.value, f.kind); err != nil {
+			return err
+		}
+	}
+	return validation.ValidateClientID(m.ClientID)
 }
 
 // RegisterWorkConn register a new work connection to control and proxies need it.

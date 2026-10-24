@@ -23,6 +23,9 @@ import (
 const (
 	// MaxRunIDLength is the maximum number of bytes accepted for a control run ID.
 	MaxRunIDLength = 64
+	// MaxLoginFieldLength is the maximum number of bytes accepted for a
+	// login's version, hostname, os, arch or user, where they are checked.
+	MaxLoginFieldLength = 255
 )
 
 func validateIdentifier(value, kind string, maxLength int) error {
@@ -45,4 +48,21 @@ func validateIdentifier(value, kind string, maxLength int) error {
 
 func ValidateRunID(runID string) error {
 	return validateIdentifier(runID, "run id", MaxRunIDLength)
+}
+
+// ValidateClientID checks a login's client ID as a run ID; empty is none.
+func ValidateClientID(clientID string) error {
+	if clientID == "" {
+		return nil
+	}
+	return validateIdentifier(clientID, "client id", MaxRunIDLength)
+}
+
+// ValidateLoginField checks a login's text field, such as its hostname;
+// empty is none.
+func ValidateLoginField(value, kind string) error {
+	if value == "" {
+		return nil
+	}
+	return validateIdentifier(value, kind, MaxLoginFieldLength)
 }

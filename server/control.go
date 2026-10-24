@@ -208,9 +208,15 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		remoteAddr = host
 	}
+	clientID := loginMsg.ClientID
+	if ctl.identity != "" {
+		// Registered by run id: the entry goes when the client leaves,
+		// and another identity's client cannot hold its client id.
+		clientID = ""
+	}
 	_, conflict := cm.registry.RegisterWithControlID(
 		loginMsg.User,
-		loginMsg.ClientID,
+		clientID,
 		ctl.runID,
 		loginMsg.Hostname,
 		loginMsg.Version,
