@@ -91,14 +91,15 @@ type ServerConfig struct {
 	// asked for. A name is one identity's: another cannot add a location
 	// or an HTTP user to it, nor have it as a tcp-tls route, until 10
 	// minutes after the identity's last proxy for it left. Its proxy
-	// names are its own: another identity may have a proxy of the same
-	// name. Its work connections must come with the same identity, and a
-	// login cannot replace a control of another identity. It may register
-	// http and tcp-tls proxies only, and opens no visitor connections and
-	// no NAT holes. frps grants its streams 256 KiB receive windows, not 6 MiB
-	// (on QUIC, all clients' when QUICIdentity is set). Its login's text
-	// fields are short and printable (validation.ValidateLoginField), and
-	// its client registry entry, keyed by run ID, goes when it leaves. One
+	// names and run IDs are its own: another identity's proxy or client
+	// of the same name or run ID is another, which neither replaces nor
+	// refuses its. Its work connections must come with the same identity.
+	// It may register http and tcp-tls proxies only, and opens no visitor
+	// connections and no NAT holes. frps grants its streams 256 KiB receive
+	// windows, not 6 MiB (on QUIC, all clients' when QUICIdentity is set).
+	// Its login's text fields are short and printable
+	// (validation.ValidateLoginField), and it has no client registry
+	// entry, which the dashboard lists by run ID and client ID. One
 	// identity holds at most 16 logged-in clients, 1024 proxies and 256
 	// names at once, across its connections. With QUICIdentity set, QUIC
 	// sends a new source a Retry before its handshake, and sends no

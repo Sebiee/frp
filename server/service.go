@@ -978,13 +978,10 @@ func (svr *Service) RegisterWorkConn(
 		return fmt.Errorf("ClientHello is not allowed on work connections")
 	}
 	xl := netpkg.NewLogFromConn(workConn)
-	ctl, exist := svr.ctlManager.GetByID(newMsg.RunID)
+	identity := netpkg.IdentityFromContext(netpkg.NewContextFromConn(workConn))
+	ctl, exist := svr.ctlManager.GetByID(identity, newMsg.RunID)
 	if !exist {
 		xl.Warnf("no client control found for run id [%s]", newMsg.RunID)
-		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
-	}
-	if id := netpkg.IdentityFromContext(netpkg.NewContextFromConn(workConn)); id != ctl.identity {
-		xl.Warnf("work connection for run id [%s] of another identity", newMsg.RunID)
 		return fmt.Errorf("no client control found for run id [%s]", newMsg.RunID)
 	}
 	if workWireProtocol != ctl.sessionCtx.WireProtocol {

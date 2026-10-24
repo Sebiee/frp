@@ -273,7 +273,7 @@ func TestServiceControlHandoffSkipsStalePendingGeneration(t *testing.T) {
 	c := <-resultC
 	require.NoError(t, c.err)
 	require.Same(t, ctlC, c.ctl)
-	_, ok := svr.ctlManager.GetByID("shared-run")
+	_, ok := svr.ctlManager.GetByID("", "shared-run")
 	require.False(t, ok)
 	require.Same(t, ctlC, currentControlForTest(svr.ctlManager, "shared-run"))
 
@@ -292,7 +292,7 @@ func TestServiceControlHandoffSkipsStalePendingGeneration(t *testing.T) {
 
 	require.NoError(t, svr.completeControlLogin(ctlC, func() error { return nil }))
 	waitForSignal(t, c.conn.readStarted, "C reader to start")
-	current, ok := svr.ctlManager.GetByID("shared-run")
+	current, ok := svr.ctlManager.GetByID("", "shared-run")
 	require.True(t, ok)
 	require.Same(t, ctlC, current)
 	require.Equal(t, int64(2), metrics.newClients())
@@ -302,7 +302,7 @@ func TestServiceControlHandoffSkipsStalePendingGeneration(t *testing.T) {
 	waitForControlDone(t, ctlC)
 	require.Equal(t, int64(2), metrics.newClients())
 	require.Equal(t, int64(2), metrics.closedClients())
-	_, ok = svr.ctlManager.GetByID("shared-run")
+	_, ok = svr.ctlManager.GetByID("", "shared-run")
 	require.False(t, ok)
 }
 
@@ -381,7 +381,7 @@ func TestServiceLoginResponseSynchronizationIsScopedToRun(t *testing.T) {
 		if result.activateErr == nil && result.active {
 			result.loginErr = svr.completeControlLogin(otherCtl, func() error { return nil })
 		}
-		result.current, result.found = svr.ctlManager.GetByID("other-run")
+		result.current, result.found = svr.ctlManager.GetByID("", "other-run")
 		unrelatedDone <- result
 	}()
 	result := waitForResult(t, unrelatedDone, "unrelated run lifecycle")
@@ -510,7 +510,7 @@ func TestServiceWorkConnRoutingRequiresCurrentRunningControl(t *testing.T) {
 
 	require.NoError(t, svr.completeControlLogin(ctl, func() error { return nil }))
 	waitForSignal(t, controlConn.readStarted, "control reader to start")
-	current, ok := svr.ctlManager.GetByID("shared-run")
+	current, ok := svr.ctlManager.GetByID("", "shared-run")
 	require.True(t, ok)
 	require.Same(t, ctl, current)
 	require.Len(t, ctl.workConnCh, 0)

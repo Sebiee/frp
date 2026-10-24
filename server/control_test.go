@@ -122,7 +122,7 @@ func TestControlRunningReplacementFinishesInWorker(t *testing.T) {
 	require.Equal(t, int64(1), metrics.newClients())
 	require.Equal(t, int64(1), metrics.closedClients())
 
-	_, ok := manager.GetByID("same-run")
+	_, ok := manager.GetByID("", "same-run")
 	require.False(t, ok)
 	require.Same(t, newCtl, currentControlForTest(manager, "same-run"))
 	info, ok := clientRegistry.GetByKey("client")
@@ -133,7 +133,7 @@ func TestControlRunningReplacementFinishesInWorker(t *testing.T) {
 	active, err := manager.Activate(newCtl)
 	require.NoError(t, err)
 	require.True(t, active)
-	_, ok = manager.GetByID("same-run")
+	_, ok = manager.GetByID("", "same-run")
 	require.False(t, ok)
 	info, ok = clientRegistry.GetByKey("client")
 	require.True(t, ok)
@@ -262,7 +262,7 @@ func TestControlManagerRejectsStaleActivateAndRemove(t *testing.T) {
 	require.False(t, active)
 	require.False(t, manager.Remove(oldCtl))
 
-	_, ok := manager.GetByID("same-run")
+	_, ok := manager.GetByID("", "same-run")
 	require.False(t, ok)
 	require.Same(t, newCtl, currentControlForTest(manager, "same-run"))
 	info, ok := clientRegistry.GetByKey("client")
@@ -294,15 +294,23 @@ func TestControlManagerKeepsRunIDsToTheirIdentity(t *testing.T) {
 	require.Empty(t, manager.Identities()) // logging in
 	require.True(t, owner.Start())
 	require.Equal(t, map[string]int{"node/a": 1}, manager.Identities())
-	require.ErrorContains(t, manager.Add(other), "another identity")
-	require.Same(t, owner, currentControlForTest(manager, "same-run"))
-	_, ok := manager.GetByID("same-run")
+	mustAddAndActivate(t, manager, other)
+	require.True(t, other.Start())
+	got, ok := manager.GetByID("node/a", "same-run")
 	require.True(t, ok)
+	require.Same(t, owner, got, "another identity's client of the run id replaces nothing")
+	got, ok = manager.GetByID("node/b", "same-run")
+	require.True(t, ok)
+	require.Same(t, other, got)
+	_, ok = manager.GetByID("", "same-run")
+	require.False(t, ok)
 
-	// The same identity reconnecting replaces it, as before.
+	// The same identity reconnecting replaces its own, as before.
 	require.NoError(t, manager.Add(again))
 	waitForControlDone(t, owner)
-	require.Same(t, again, currentControlForTest(manager, "same-run"))
+	got, ok = manager.GetByID("node/b", "same-run")
+	require.True(t, ok)
+	require.Same(t, other, got)
 }
 
 func TestControlManagerPreservesClientIDConflict(t *testing.T) {
@@ -326,21 +334,20 @@ func TestControlManagerPreservesClientIDConflict(t *testing.T) {
 	require.Equal(t, "run-one", info.RunID)
 }
 
-func TestControlManagerForgetsClientsWithAnIdentity(t *testing.T) {
+func TestControlManagerRegistersNoClientWithAnIdentity(t *testing.T) {
 	clientRegistry := registry.NewClientRegistry()
 	manager := NewControlManager(clientRegistry)
 	metrics := newCountingServerMetrics()
-	a, _ := newLifecycleTestControl(t, "run-a", "replica", metrics)
+	a, _ := newLifecycleTestControl(t, "same-run", "replica", metrics)
 	a.identity = "node/a"
-	b, _ := newLifecycleTestControl(t, "run-b", "replica", metrics)
+	b, _ := newLifecycleTestControl(t, "same-run", "replica", metrics)
 	b.identity = "node/b"
 
 	mustAddAndActivate(t, manager, a)
 	mustAddAndActivate(t, manager, b) // a client id of another identity's client is no conflict
-	require.Len(t, clientRegistry.List(), 2)
+	require.Empty(t, clientRegistry.List())
 	require.True(t, manager.Remove(a))
 	require.True(t, manager.Remove(b))
-	require.Empty(t, clientRegistry.List())
 }
 
 func TestControlManagerFailedLoginWriteReleasesRunWithoutStarting(t *testing.T) {
@@ -471,7 +478,7 @@ func waitForControlDone(t *testing.T, ctl *Control) {
 func currentControlForTest(manager *ControlManager, runID string) *Control {
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
-	entry := manager.ctlsByRunID[runID]
+	entry := manager.ctlsByRunID[runKey{runID: runID}]
 	if entry == nil {
 		return nil
 	}
@@ -481,7 +488,7 @@ func currentControlForTest(manager *ControlManager, runID string) *Control {
 func currentRunGateForTest(manager *ControlManager, runID string) *sync.Mutex {
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
-	entry := manager.ctlsByRunID[runID]
+	entry := manager.ctlsByRunID[runKey{runID: runID}]
 	if entry == nil {
 		return nil
 	}

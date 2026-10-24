@@ -62,8 +62,8 @@ type controlEntry struct {
 }
 
 type ControlManager struct {
-	// controls indexed by run id
-	ctlsByRunID map[string]*controlEntry
+	// controls indexed by client identity and run id
+	ctlsByRunID map[runKey]*controlEntry
 	registry    *registry.ClientRegistry
 	holdings    identityHoldings
 	closed      bool
@@ -71,9 +71,14 @@ type ControlManager struct {
 	mu sync.RWMutex
 }
 
+// runKey names a client's control: a run id is the client's own choice,
+// and no secret (frps logs it), so each client identity
+// (ServerConfig.Identity) has its own.
+type runKey struct{ identity, runID string }
+
 func NewControlManager(clientRegistry *registry.ClientRegistry) *ControlManager {
 	return &ControlManager{
-		ctlsByRunID: make(map[string]*controlEntry),
+		ctlsByRunID: make(map[runKey]*controlEntry),
 		registry:    clientRegistry,
 	}
 }
@@ -81,9 +86,9 @@ func NewControlManager(clientRegistry *registry.ClientRegistry) *ControlManager 
 // lockCurrentRun returns the current entry with its run gate held. It never
 // waits for the gate while holding cm.mu and revalidates the gate after waiting.
 // The global order is runMu, cm.mu, ctl.lifecycleMu, then registry locks.
-func (cm *ControlManager) lockCurrentRun(runID string, allowClosed bool) (*controlEntry, bool) {
+func (cm *ControlManager) lockCurrentRun(key runKey, allowClosed bool) (*controlEntry, bool) {
 	cm.mu.RLock()
-	entry, ok := cm.ctlsByRunID[runID]
+	entry, ok := cm.ctlsByRunID[key]
 	if cm.closed && !allowClosed {
 		ok = false
 	}
@@ -95,7 +100,7 @@ func (cm *ControlManager) lockCurrentRun(runID string, allowClosed bool) (*contr
 	runMu := entry.runMu
 	runMu.Lock()
 	cm.mu.RLock()
-	entry, ok = cm.ctlsByRunID[runID]
+	entry, ok = cm.ctlsByRunID[key]
 	if (cm.closed && !allowClosed) || !ok || entry.runMu != runMu {
 		ok = false
 	}
@@ -113,7 +118,7 @@ func (cm *ControlManager) Add(ctl *Control) error {
 	for {
 		// Never wait for a run gate while holding cm.mu.
 		cm.mu.RLock()
-		old := cm.ctlsByRunID[ctl.runID]
+		old := cm.ctlsByRunID[ctl.key()]
 		cm.mu.RUnlock()
 		if old != nil {
 			old.runMu.Lock()
@@ -127,19 +132,12 @@ func (cm *ControlManager) Add(ctl *Control) error {
 			}
 			return fmt.Errorf("control manager is closed")
 		}
-		if cm.ctlsByRunID[ctl.runID] != old {
+		if cm.ctlsByRunID[ctl.key()] != old {
 			cm.mu.Unlock()
 			if old != nil {
 				old.runMu.Unlock()
 			}
 			continue
-		}
-		if old != nil && old.ctl.identity != ctl.identity {
-			// A run id is no secret: frps logs it. It only replaces a
-			// control of the same identity.
-			cm.mu.Unlock()
-			old.runMu.Unlock()
-			return fmt.Errorf("run id [%s] belongs to another identity", ctl.runID)
 		}
 		if old == nil && ctl.identity != "" && cm.controlsLocked(ctl.identity) >= maxControlsPerIdentity {
 			cm.mu.Unlock()
@@ -171,7 +169,7 @@ func (cm *ControlManager) Add(ctl *Control) error {
 			entry.registryOnline = old.registryOnline
 			entry.registryControlID = old.registryControlID
 		}
-		cm.ctlsByRunID[ctl.runID] = entry
+		cm.ctlsByRunID[ctl.key()] = entry
 		cm.mu.Unlock()
 		if old != nil {
 			old.runMu.Unlock()
@@ -198,7 +196,7 @@ func (cm *ControlManager) controlsLocked(identity string) int {
 // Activate registers ctl as online only if it is still the pending current
 // generation.
 func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
-	entry, ok := cm.lockCurrentRun(ctl.runID, false)
+	entry, ok := cm.lockCurrentRun(ctl.key(), false)
 	if !ok {
 		return false, nil
 	}
@@ -206,7 +204,7 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	if cm.closed || cm.ctlsByRunID[ctl.runID] != entry || entry.ctl != ctl || entry.id != ctl.controlID {
+	if cm.closed || cm.ctlsByRunID[ctl.key()] != entry || entry.ctl != ctl || entry.id != ctl.controlID {
 		return false, nil
 	}
 
@@ -218,21 +216,21 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 	if ctl.activated {
 		return true, nil
 	}
+	if ctl.identity != "" {
+		// No registry entry: the registry keys clients by run id and
+		// client id, which another identity's client may share.
+		ctl.activated = true
+		return true, nil
+	}
 
 	loginMsg := ctl.sessionCtx.LoginMsg
 	remoteAddr := ctl.sessionCtx.Conn.RemoteAddr().String()
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		remoteAddr = host
 	}
-	clientID := loginMsg.ClientID
-	if ctl.identity != "" {
-		// Registered by run id: the entry goes when the client leaves,
-		// and another identity's client cannot hold its client id.
-		clientID = ""
-	}
 	_, conflict := cm.registry.RegisterWithControlID(
 		loginMsg.User,
-		clientID,
+		loginMsg.ClientID,
 		ctl.runID,
 		loginMsg.Hostname,
 		loginMsg.Version,
@@ -255,7 +253,7 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 // The callback must only perform that bounded write; it must not call back into
 // the control manager or the same control lifecycle.
 func (cm *ControlManager) completeLogin(ctl *Control, writeSuccess func() error) (bool, error) {
-	entry, ok := cm.lockCurrentRun(ctl.runID, false)
+	entry, ok := cm.lockCurrentRun(ctl.key(), false)
 	if !ok {
 		return false, nil
 	}
@@ -280,7 +278,7 @@ func (cm *ControlManager) completeLogin(ctl *Control, writeSuccess func() error)
 
 // Remove deletes and offlines ctl only if it is still the current generation.
 func (cm *ControlManager) Remove(ctl *Control) bool {
-	entry, ok := cm.lockCurrentRun(ctl.runID, true)
+	entry, ok := cm.lockCurrentRun(ctl.key(), true)
 	if !ok {
 		return false
 	}
@@ -288,18 +286,19 @@ func (cm *ControlManager) Remove(ctl *Control) bool {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	if cm.ctlsByRunID[ctl.runID] != entry || entry.ctl != ctl || entry.id != ctl.controlID {
+	if cm.ctlsByRunID[ctl.key()] != entry || entry.ctl != ctl || entry.id != ctl.controlID {
 		return false
 	}
-	delete(cm.ctlsByRunID, ctl.runID)
+	delete(cm.ctlsByRunID, ctl.key())
 	if entry.registryOnline {
 		cm.registry.MarkOfflineByRunIDAndControlID(ctl.runID, uint64(entry.registryControlID))
 	}
 	return true
 }
 
-func (cm *ControlManager) GetByID(runID string) (ctl *Control, ok bool) {
-	entry, ok := cm.lockCurrentRun(runID, false)
+// GetByID is the running control of identity's client of runID.
+func (cm *ControlManager) GetByID(identity, runID string) (ctl *Control, ok bool) {
+	entry, ok := cm.lockCurrentRun(runKey{identity, runID}, false)
 	if !ok {
 		return nil, false
 	}
@@ -318,7 +317,8 @@ func (cm *ControlManager) GetByID(runID string) (ctl *Control, ok bool) {
 // control while its run and lifecycle ownership are held. The callback must
 // only perform the in-memory, buffered visitor admission.
 func (cm *ControlManager) admitVisitorByRunID(runID string, admit func(user, wireProtocol, udpPacketCodec string) error) (bool, error) {
-	entry, ok := cm.lockCurrentRun(runID, false)
+	// A client with an identity opens no visitor connections.
+	entry, ok := cm.lockCurrentRun(runKey{runID: runID}, false)
 	if !ok {
 		return false, nil
 	}
@@ -336,7 +336,7 @@ func (cm *ControlManager) admitVisitorByRunID(runID string, admit func(user, wir
 // RegisterWorkConn transfers conn to ctl only if ctl is still the current
 // running generation. On error, ownership remains with the caller.
 func (cm *ControlManager) RegisterWorkConn(ctl *Control, conn *proxy.WorkConn) error {
-	entry, ok := cm.lockCurrentRun(ctl.runID, false)
+	entry, ok := cm.lockCurrentRun(ctl.key(), false)
 	if !ok {
 		cm.mu.RLock()
 		closed := cm.closed
@@ -541,6 +541,10 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, erro
 
 func (ctl *Control) RunID() string {
 	return ctl.runID
+}
+
+func (ctl *Control) key() runKey {
+	return runKey{ctl.identity, ctl.runID}
 }
 
 func (ctl *Control) ID() ControlID {
