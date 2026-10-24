@@ -89,7 +89,8 @@ type Service struct {
 	kcpListener net.Listener
 
 	// Accept connections using quic
-	quicListener *quic.Listener
+	quicListener  *quic.Listener
+	quicTransport *quic.Transport
 
 	// Accept connections using websocket
 	websocketListener net.Listener
@@ -288,14 +289,31 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 			MaxIncomingStreams: int64(cfg.Transport.QUIC.MaxIncomingStreams),
 			KeepAlivePeriod:    time.Duration(cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
 		}
+		udpAddr, err := net.ResolveUDPAddr("udp", address)
+		if err != nil {
+			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, err)
+		}
+		udpConn, err := net.ListenUDP("udp", udpAddr)
+		if err != nil {
+			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, err)
+		}
+		svr.quicTransport = &quic.Transport{Conn: udpConn}
 		if cfg.QUICIdentity != nil {
 			// As yamux's for a client with an identity, unread streams
 			// included: quic-go's grow to 6 MiB.
 			quicCfg.InitialStreamReceiveWindow = 256 << 10
 			quicCfg.MaxStreamReceiveWindow = 256 << 10
+			// The client's certificate is checked only after frps has
+			// signed its handshake for an address that may be spoofed: a
+			// Retry proves the address first, so a stranger cannot aim
+			// frps's handshakes at another host. Nor does frps tell
+			// strangers which versions it speaks.
+			svr.quicTransport.VerifySourceAddress = func(net.Addr) bool { return true }
+			svr.quicTransport.DisableVersionNegotiationPackets = true
 		}
-		svr.quicListener, err = quic.ListenAddr(address, quicTLSCfg, quicCfg)
+		svr.quicListener, err = svr.quicTransport.Listen(quicTLSCfg, quicCfg)
 		if err != nil {
+			_ = udpConn.Close()
 			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, err)
 		}
 		log.Infof("frps quic listen on %s", address)
@@ -438,6 +456,8 @@ func (svr *Service) Close() error {
 	}
 	if svr.quicListener != nil {
 		svr.quicListener.Close()
+		svr.quicTransport.Close()
+		svr.quicTransport.Conn.Close()
 	}
 	if svr.websocketListener != nil {
 		svr.websocketListener.Close()
