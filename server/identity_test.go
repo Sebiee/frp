@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"reflect"
@@ -363,4 +364,82 @@ func TestIdentityLoginsHaveShortPrintableFields(t *testing.T) {
 	require.NoError(t, err)
 	_, err = login(t, dial(""), msg.Login{Hostname: long})
 	require.NoError(t, err, "a client with no identity is not limited")
+}
+
+// relogin logs in on sess until frps admits it, within 5 seconds.
+func relogin(t *testing.T, sess session) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := login(t, sess, msg.Login{})
+		if err == nil {
+			return
+		}
+		require.True(t, time.Now().Before(deadline), "still refused: %v", err)
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func httpProxyMsg(name, domain string) msg.NewProxy {
+	return msg.NewProxy{ProxyName: name, ProxyType: "http", CustomDomains: []string{domain}}
+}
+
+func TestIdentityClientsHaveLimits(t *testing.T) {
+	t.Run("logins", func(t *testing.T) {
+		dial := identityServer(t)
+		sess := dial("node/a")
+		var first *testClient
+		for i := range 16 {
+			c, err := login(t, sess, msg.Login{})
+			require.NoError(t, err, "login %d", i)
+			if first == nil {
+				first = c
+			}
+		}
+		_, err := login(t, sess, msg.Login{})
+		require.Error(t, err)
+		_, err = login(t, dial("node/a"), msg.Login{})
+		require.Error(t, err, "on another connection too")
+		_, err = login(t, dial("node/b"), msg.Login{})
+		require.NoError(t, err, "another identity has its own")
+		_, err = login(t, dial(""), msg.Login{})
+		require.NoError(t, err)
+
+		require.NoError(t, first.stream.Close())
+		relogin(t, sess)
+	})
+	t.Run("proxies", func(t *testing.T) {
+		dial := identityServer(t)
+		a, err := login(t, dial("node/a"), msg.Login{})
+		require.NoError(t, err)
+		b, err := login(t, dial("node/a"), msg.Login{})
+		require.NoError(t, err)
+		for i := range 1024 {
+			c := a
+			if i%2 == 1 {
+				c = b
+			}
+			require.NoError(t, c.newProxy(httpProxyMsg(fmt.Sprint("web", i), "app.example.com")), "proxy %d", i)
+		}
+		require.Error(t, a.newProxy(httpProxyMsg("web1024", "app.example.com")))
+		other, err := login(t, dial("node/b"), msg.Login{})
+		require.NoError(t, err)
+		require.NoError(t, other.newProxy(httpProxyMsg("other", "other.example.com")))
+
+		a.send(&msg.CloseProxy{ProxyName: "web0"})
+		require.NoError(t, a.newProxy(httpProxyMsg("web1024", "app.example.com")))
+	})
+	t.Run("names", func(t *testing.T) {
+		dial := identityServer(t)
+		a, err := login(t, dial("node/a"), msg.Login{})
+		require.NoError(t, err)
+		for i := range 256 {
+			require.NoError(t, a.newProxy(httpProxyMsg(fmt.Sprint("site", i), fmt.Sprintf("site%d.example.com", i))), "name %d", i)
+		}
+		require.Error(t, a.newProxy(httpProxyMsg("site256", "site256.example.com")))
+		require.NoError(t, a.newProxy(httpProxyMsg("again", "site0.example.com")), "a name it has")
+
+		a.send(&msg.CloseProxy{ProxyName: "site1"})
+		require.NoError(t, a.newProxy(httpProxyMsg("site256", "site256.example.com")))
+	})
 }
