@@ -373,13 +373,22 @@ func TestIdentityLoginsHaveShortPrintableFields(t *testing.T) {
 // relogin logs in on sess until frps admits it, within 5 seconds.
 func relogin(t *testing.T, sess session) {
 	t.Helper()
+	eventually(t, func() error {
+		_, err := login(t, sess, msg.Login{})
+		return err
+	})
+}
+
+// eventually retries f until it succeeds, within 5 seconds.
+func eventually(t *testing.T, f func() error) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		_, err := login(t, sess, msg.Login{})
+		err := f()
 		if err == nil {
 			return
 		}
-		require.True(t, time.Now().Before(deadline), "still refused: %v", err)
+		require.True(t, time.Now().Before(deadline), "still failing: %v", err)
 		time.Sleep(50 * time.Millisecond)
 	}
 }
@@ -519,4 +528,26 @@ func TestQUICNegotiatesNoVersionWhenItNamesClients(t *testing.T) {
 		answered := err == nil && n > 5 && binary.BigEndian.Uint32(p[1:5]) == 0
 		require.Equal(t, !named, answered, "named %v: a version negotiation packet", named)
 	}
+}
+
+// A proxy name is its identity's own. Another identity's proxy of the
+// same name, registered while the owner reconnects, does not keep the
+// owner from its proxy, and so from its name.
+func TestIdentitiesHaveTheirOwnProxyNames(t *testing.T) {
+	dial := identityServer(t)
+	a, err := login(t, dial("node/a"), msg.Login{})
+	require.NoError(t, err)
+	require.NoError(t, a.newProxy(httpProxyMsg("web", "app.example.com")))
+	replica, err := login(t, dial("node/a"), msg.Login{})
+	require.NoError(t, err)
+	require.Error(t, replica.newProxy(httpProxyMsg("web", "app.example.com")), "one identity's proxy name is one proxy's")
+
+	b, err := login(t, dial("node/b"), msg.Login{})
+	require.NoError(t, err)
+	require.NoError(t, b.newProxy(httpProxyMsg("web", "squat.example.com")))
+
+	require.NoError(t, a.stream.Close())
+	again, err := login(t, dial("node/a"), msg.Login{})
+	require.NoError(t, err)
+	eventually(t, func() error { return again.newProxy(httpProxyMsg("web", "app.example.com")) })
 }
