@@ -283,11 +283,18 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		address := net.JoinHostPort(quicBind, strconv.Itoa(cfg.QUICBindPort))
 		quicTLSCfg := tlsConfig.Clone()
 		quicTLSCfg.NextProtos = []string{"frp"}
-		svr.quicListener, err = quic.ListenAddr(address, quicTLSCfg, &quic.Config{
+		quicCfg := &quic.Config{
 			MaxIdleTimeout:     time.Duration(cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
 			MaxIncomingStreams: int64(cfg.Transport.QUIC.MaxIncomingStreams),
 			KeepAlivePeriod:    time.Duration(cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-		})
+		}
+		if cfg.QUICIdentity != nil {
+			// As yamux's for a client with an identity, unread streams
+			// included: quic-go's grow to 6 MiB.
+			quicCfg.InitialStreamReceiveWindow = 256 << 10
+			quicCfg.MaxStreamReceiveWindow = 256 << 10
+		}
+		svr.quicListener, err = quic.ListenAddr(address, quicTLSCfg, quicCfg)
 		if err != nil {
 			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, err)
 		}
@@ -746,7 +753,13 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 				fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.Transport.TCPMuxKeepaliveInterval) * time.Second
 				// Use trace level for yamux logs
 				fmuxCfg.LogOutput = xlog.NewTraceWriter(xlog.FromContextSafe(ctx))
-				fmuxCfg.MaxStreamWindowSize = 6 * 1024 * 1024
+				// frps holds what a stream's window lets the client send,
+				// read or not: a client with an identity gets yamux's own
+				// 256 KiB, so its pooled work connections, and its requests
+				// whose visitors read slowly, hold that much each.
+				if netpkg.IdentityFromContext(ctx) == "" {
+					fmuxCfg.MaxStreamWindowSize = 6 * 1024 * 1024
+				}
 				session, err := fmux.Server(frpConn, fmuxCfg)
 				if err != nil {
 					log.Warnf("failed to create mux connection: %v", err)

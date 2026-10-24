@@ -94,7 +94,9 @@ type ServerConfig struct {
 	// connections must come with the same identity, and a login cannot
 	// replace a control of another identity. It may register http and
 	// tcp-tls proxies only, and opens no visitor connections and no NAT
-	// holes. Not serialized. For in-process embedders.
+	// holes. frps grants its streams 256 KiB receive windows, not 6 MiB
+	// (on QUIC, all clients' when QUICIdentity is set). Not serialized.
+	// For in-process embedders.
 	Identity     func(net.Conn) string            `json:"-"`
 	QUICIdentity func(tls.ConnectionState) string `json:"-"`
 	// EnableTCPTLS accepts tcp-tls proxies: the embedder ends TLS itself,
