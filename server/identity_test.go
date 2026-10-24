@@ -22,6 +22,7 @@ import (
 	"net"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -341,4 +342,25 @@ func TestIdentityClientsCannotPunchHoles(t *testing.T) {
 	node.send(hole)
 	_, ok = node.await(&msg.NatHoleResp{}, 500*time.Millisecond)
 	require.False(t, ok, "a client with an identity is not")
+}
+
+func TestIdentityLoginsHaveShortPrintableFields(t *testing.T) {
+	dial := identityServer(t)
+	long := strings.Repeat("h", 9000)
+	for field, m := range map[string]msg.Login{
+		"version":   {Version: long},
+		"hostname":  {Hostname: long},
+		"os":        {Os: long},
+		"arch":      {Arch: long},
+		"user":      {User: long},
+		"client id": {ClientID: strings.Repeat("c", 65)},
+		"line":      {ClientID: "a\nb"},
+	} {
+		_, err := login(t, dial("node/a"), m)
+		require.Error(t, err, field)
+	}
+	_, err := login(t, dial("node/a"), msg.Login{Version: "0.71.0", Hostname: "web-7f9c4", Os: "linux", Arch: "amd64", User: "web-7f9c4", ClientID: "replica-1"})
+	require.NoError(t, err)
+	_, err = login(t, dial(""), msg.Login{Hostname: long})
+	require.NoError(t, err, "a client with no identity is not limited")
 }

@@ -326,6 +326,23 @@ func TestControlManagerPreservesClientIDConflict(t *testing.T) {
 	require.Equal(t, "run-one", info.RunID)
 }
 
+func TestControlManagerForgetsClientsWithAnIdentity(t *testing.T) {
+	clientRegistry := registry.NewClientRegistry()
+	manager := NewControlManager(clientRegistry)
+	metrics := newCountingServerMetrics()
+	a, _ := newLifecycleTestControl(t, "run-a", "replica", metrics)
+	a.identity = "node/a"
+	b, _ := newLifecycleTestControl(t, "run-b", "replica", metrics)
+	b.identity = "node/b"
+
+	mustAddAndActivate(t, manager, a)
+	mustAddAndActivate(t, manager, b) // a client id of another identity's client is no conflict
+	require.Len(t, clientRegistry.List(), 2)
+	require.True(t, manager.Remove(a))
+	require.True(t, manager.Remove(b))
+	require.Empty(t, clientRegistry.List())
+}
+
 func TestControlManagerFailedLoginWriteReleasesRunWithoutStarting(t *testing.T) {
 	clientRegistry := registry.NewClientRegistry()
 	manager := NewControlManager(clientRegistry)
