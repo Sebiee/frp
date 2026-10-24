@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -52,6 +53,7 @@ type workConn struct {
 	br        *bufio.Reader
 	bw        *bufio.Writer
 	read      int64 // bytes read from the connection, under br
+	headEnd   int64 // where read stops while a response head is read; 0 for none
 	idleSince time.Time
 	busy      atomic.Bool // counted in active
 }
@@ -89,13 +91,34 @@ func newWorkConn(c net.Conn) *workConn {
 	return wc
 }
 
+// A response's status line and headers, and the 1xx responses before it,
+// are bounded: a hostile origin could otherwise send a header that never
+// ends, all of it held until the header timeout.
+const (
+	maxResponseHeaderBytes = 64 << 10 // each response head
+	max1xxResponses        = 5
+)
+
+var (
+	errResponseHeadTooLarge = fmt.Errorf("response headers exceed %d bytes", maxResponseHeaderBytes)
+	errTooMany1xxResponses  = fmt.Errorf("more than %d 1xx responses", max1xxResponses)
+)
+
 // readCounter counts what br reads, so a failure can tell whether any of
-// the response had arrived.
+// the response had arrived, and stops at headEnd.
 type readCounter struct{ wc *workConn }
 
 func (r readCounter) Read(p []byte) (int, error) {
-	n, err := r.wc.Conn.Read(p)
-	r.wc.read += int64(n)
+	wc := r.wc
+	if wc.headEnd > 0 {
+		left := wc.headEnd - wc.read
+		if left <= 0 {
+			return 0, errResponseHeadTooLarge
+		}
+		p = p[:min(int64(len(p)), left)]
+	}
+	n, err := wc.Conn.Read(p)
+	wc.read += int64(n)
 	return n, err
 }
 
@@ -213,9 +236,14 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 		timedOut.Store(true)
 		_ = wc.Close()
 	})
-	for {
+	for n1xx := 0; ; n1xx++ {
+		wc.headEnd = wc.read + maxResponseHeaderBytes
 		resp, err = http.ReadResponse(wc.br, req)
 		if err != nil || resp.StatusCode < 100 || resp.StatusCode >= 200 || resp.StatusCode == http.StatusSwitchingProtocols {
+			break
+		}
+		if n1xx == max1xxResponses {
+			err = errTooMany1xxResponses
 			break
 		}
 		// 1xx: passed on through the trace, as http.Transport does, for
@@ -226,6 +254,7 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 			}
 		}
 	}
+	wc.headEnd = 0
 	if !timer.Stop() || timedOut.Load() {
 		return fail(StageHeaders, errResponseHeaderTimeout{}, false)
 	}
