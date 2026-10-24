@@ -340,6 +340,20 @@ func TestDomainClaimsBind(t *testing.T) {
 	})
 }
 
+// Bind holds at most maxGraced names of one identity in their grace,
+// and says so when it holds no more.
+func TestDomainClaimsBindIsBounded(t *testing.T) {
+	c := NewDomainClaims()
+	for i := range maxGraced {
+		require.NoError(t, c.Bind(fmt.Sprintf("n%d.example.com", i), "node/1"))
+	}
+	require.Error(t, c.Bind("full.example.com", "node/1"))
+	_, ok := c.Owner("full.example.com")
+	require.False(t, ok)
+	require.NoError(t, c.Bind("n0.example.com", "node/1"), "a name it holds")
+	require.NoError(t, c.Bind("full.example.com", "node/2"), "another identity has its own")
+}
+
 // A name is claimed and routed in one spelling: frps and its embedder
 // never fold two claims into one name, or one into another's.
 func TestDomainClaimsCanonicalNames(t *testing.T) {

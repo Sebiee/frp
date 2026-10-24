@@ -261,7 +261,7 @@ func TestEmbedderRestoresNames(t *testing.T) {
 	require.NoError(t, svr.BindDomain("db.example.com", "victim"))
 	require.Error(t, svr.BindDomain("app.example.com", "attacker"))
 	require.Error(t, svr.BindDomain("tunnel.example.com", "victim"))
-	owner, ok := svr.DomainOwner("app.example.com")
+	owner, ok := svr.DomainOwner("App.example.com")
 	require.True(t, ok)
 	require.Equal(t, "victim", owner)
 	_, ok = svr.DomainOwner("other.example.com")
