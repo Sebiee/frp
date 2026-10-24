@@ -27,11 +27,24 @@ func (e *DomainClaimedError) Error() string {
 	return fmt.Sprintf("domain [%s] belongs to %s proxies, it cannot have %s ones too", e.Domain, e.Holder, e.Refused)
 }
 
-// DomainClaims holds each name for one kind of proxy, http or tcp-tls,
-// while any proxy of that kind has it. The first kind to claim a name
-// keeps it; the other kind is refused until the last claim is released.
+// DomainOwnedError refuses a proxy whose name another client identity
+// holds.
+type DomainOwnedError struct {
+	Domain string
+}
+
+func (e *DomainOwnedError) Error() string {
+	return fmt.Sprintf("domain [%s] is already used by another client", e.Domain)
+}
+
+// DomainClaims holds each name for one client identity
+// (ServerConfig.Identity) and one kind of proxy, http or tcp-tls, while
+// any proxy has it: all of a name's locations, HTTP users and routes are
+// one identity's. The first to claim a name keeps it; another identity,
+// and the other kind, are refused until the last claim is released.
 type DomainClaims struct {
-	// OnConflict, when set, is told of each refused claim.
+	// OnConflict, when set, is told of each claim refused because the
+	// other kind holds the name.
 	OnConflict func(domain, refused, holder string)
 	// Reserved, when set, are names no proxy may claim: an embedder's
 	// own, such as the name its clients log in on.
@@ -42,19 +55,21 @@ type DomainClaims struct {
 }
 
 type domainClaim struct {
-	kind string
-	n    int
+	identity string
+	kind     string
+	n        int
 }
 
 func NewDomainClaims() *DomainClaims {
 	return &DomainClaims{m: make(map[string]*domainClaim)}
 }
 
-// Claim holds domain, as name, for kind until release is called. name
-// is its canonical form (canonicalDomain), the one to route by. It
-// refuses a name that has none, a reserved one, and one the other kind
-// holds, with a *DomainClaimedError. A nil c claims nothing.
-func (c *DomainClaims) Claim(domain, kind string) (name string, release func(), err error) {
+// Claim holds domain, as name, for kind and the client identity until
+// release is called. name is its canonical form (canonicalDomain), the
+// one to route by. It refuses a name that has none, a reserved one, one
+// the other kind holds, with a *DomainClaimedError, and one another
+// identity holds, with a *DomainOwnedError. A nil c claims nothing.
+func (c *DomainClaims) Claim(domain, kind, identity string) (name string, release func(), err error) {
 	name, err = canonicalDomain(domain, kind)
 	if err != nil {
 		return "", nil, err
@@ -67,17 +82,20 @@ func (c *DomainClaims) Claim(domain, kind string) (name string, release func(), 
 	}
 	c.mu.Lock()
 	cl := c.m[name]
-	if cl != nil && cl.kind != kind {
+	switch {
+	case cl == nil:
+		cl = &domainClaim{identity: identity, kind: kind}
+		c.m[name] = cl
+	case cl.kind != kind:
 		holder := cl.kind
 		c.mu.Unlock()
 		if c.OnConflict != nil {
 			c.OnConflict(name, kind, holder)
 		}
 		return "", nil, &DomainClaimedError{Domain: name, Refused: kind, Holder: holder}
-	}
-	if cl == nil {
-		cl = &domainClaim{kind: kind}
-		c.m[name] = cl
+	case cl.identity != identity:
+		c.mu.Unlock()
+		return "", nil, &DomainOwnedError{Domain: name}
 	}
 	cl.n++
 	c.mu.Unlock()
@@ -168,7 +186,7 @@ func NewTCPTLSRoutes(claims *DomainClaims, onDomain func(domain string, added bo
 // Register adds proxy, of the client identity, to domain's route, until
 // unregister is called.
 func (r *TCPTLSRoutes) Register(proxy, identity, domain string, alpn []string, dial TCPTLSDialFunc) (unregister func(), err error) {
-	domain, release, err := r.claims.Claim(domain, DomainKindTCPTLS)
+	domain, release, err := r.claims.Claim(domain, DomainKindTCPTLS, identity)
 	if err != nil {
 		return nil, err
 	}

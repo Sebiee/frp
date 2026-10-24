@@ -79,6 +79,32 @@ func tcpTLSProxy(name, domain string) v1.ProxyConfigurer {
 	return c
 }
 
+func TestNameBelongsToOneIdentity(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	_, err := publish(t, svr, "victim", httpProxy("web", "app.example.com", ""))
+	require.NoError(t, err)
+
+	for _, pc := range []v1.ProxyConfigurer{
+		httpProxy("same", "app.example.com", ""),
+		httpProxy("root", "app.example.com", "", "/"),
+		httpProxy("login", "app.example.com", "", "/login"),
+		httpProxy("alice", "app.example.com", "alice"),
+		tcpTLSProxy("tcp", "app.example.com"),
+	} {
+		_, err := publish(t, svr, "attacker", pc)
+		require.Error(t, err, pc.GetBaseConfig().Name)
+	}
+	require.Equal(t, "victim", reach(svr, "app.example.com", "/", ""))
+	require.Equal(t, "victim", reach(svr, "app.example.com", "/login", ""))
+	require.Equal(t, "victim", reach(svr, "app.example.com", "/", "alice"))
+
+	_, err = publish(t, svr, "victim", httpProxy("api", "app.example.com", "", "/api"))
+	require.NoError(t, err, "one identity has as many locations as it likes")
+	_, err = publish(t, svr, "victim", httpProxy("bob", "app.example.com", "bob"))
+	require.NoError(t, err, "and HTTP users")
+	require.Equal(t, "victim", reach(svr, "app.example.com", "/api/items", ""))
+}
+
 func TestNamesAreCanonical(t *testing.T) {
 	var added []string
 	svr := newNamesTestService(t, func(domain string, up bool) {

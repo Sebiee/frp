@@ -83,8 +83,9 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 
 	addrs := make([]string, 0)
 	for _, domain := range domains {
-		// A name is an http name or a tcp-tls route, not both.
-		name, release, claimErr := pxy.rc.DomainClaims.Claim(domain, group.DomainKindHTTP)
+		// A name is one identity's, and an http name or a tcp-tls route,
+		// not both.
+		name, release, claimErr := pxy.rc.DomainClaims.Claim(domain, group.DomainKindHTTP, identity)
 		if claimErr != nil {
 			err = claimErr
 			return

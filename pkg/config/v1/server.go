@@ -86,7 +86,8 @@ type ServerConfig struct {
 	// has its HTTP proxies grouped by it: the proxies of one identity for
 	// the same domain, location, and HTTP user share the route, and the
 	// requests are spread across them, whatever load balancer group they
-	// asked for; another identity cannot take the route. Its work
+	// asked for. A name is one identity's: another cannot add a location
+	// or an HTTP user to it, nor have it as a tcp-tls route. Its work
 	// connections must come with the same identity, and a login cannot
 	// replace a control of another identity. Not serialized. For
 	// in-process embedders.
