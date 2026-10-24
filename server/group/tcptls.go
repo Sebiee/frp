@@ -57,7 +57,7 @@ type DomainClaims struct {
 	// minutes.
 	Grace time.Duration
 
-	mu sync.Mutex
+	mu sync.RWMutex
 	m  map[string]*domainClaim
 }
 
@@ -149,6 +149,17 @@ func (c *DomainClaims) expire(name string, cl *domainClaim) {
 	if c.m[name] == cl && !cl.held(time.Now()) {
 		delete(c.m, name)
 	}
+}
+
+// Owner is the client identity name belongs to: the one whose proxies
+// hold it, or held it within Grace.
+func (c *DomainClaims) Owner(name string) (identity string, ok bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if cl := c.m[name]; cl != nil && cl.held(time.Now()) {
+		return cl.identity, true
+	}
+	return "", false
 }
 
 // canonicalDomain is domain as frps keys and routes it, in lower case.

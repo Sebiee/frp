@@ -212,6 +212,47 @@ func TestRoutersGetByRouteNoMatch(t *testing.T) {
 	}
 }
 
+// A domain that belongs to an identity keeps the requests its routes
+// miss from other identities' wildcards, also while it has no route.
+func TestRoutersGetByRouteOwnedDomain(t *testing.T) {
+	owners := map[string]string{
+		"app.example.com": "a", "vault.example.com": "a", "away.example.com": "a",
+		"*.example.com": "x", "*": "x",
+		"api.example.org": "a", "*.example.org": "a",
+	}
+	routers := NewRouters()
+	routers.Owner = func(domain string) (string, bool) {
+		owner, ok := owners[domain]
+		return owner, ok
+	}
+	require.NoError(t, routers.Add("app.example.com", "/api", "", "a"))
+	require.NoError(t, routers.Add("vault.example.com", "", "alice", "a"))
+	require.NoError(t, routers.Add("*.example.com", "", "", "x"))
+	require.NoError(t, routers.Add("*", "", "", "x"))
+	require.NoError(t, routers.Add("api.example.org", "/v1", "", "a"))
+	require.NoError(t, routers.Add("*.example.org", "", "", "a wildcard"))
+
+	for _, c := range []struct{ host, path, user, want string }{
+		{"app.example.com", "/api/items", "", "a"},
+		{"app.example.com", "/login", "", ""},
+		{"app.example.com", "/", "", ""},
+		{"vault.example.com", "/", "alice", "a"},
+		{"vault.example.com", "/", "bob", ""},
+		{"vault.example.com", "/", "", ""},
+		{"away.example.com", "/", "", ""},
+		{"other.example.com", "/", "", "x"},
+		{"other.test", "/", "", "x"},
+		{"api.example.org", "/", "", "a wildcard"},
+		{"www.example.org", "/", "", "a wildcard"},
+	} {
+		got := ""
+		if vr, ok := routers.getByRoute(c.host, c.path, c.user); ok {
+			got = vr.payload.(string)
+		}
+		require.Equal(t, c.want, got, "%s%s user=%q", c.host, c.path, c.user)
+	}
+}
+
 func TestRoutersConcurrentGetByRouteAndAdd(t *testing.T) {
 	routers := NewRouters()
 	require.NoError(t, routers.Add("*.example.com", "/api", "", "wildcard"))

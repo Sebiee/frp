@@ -220,11 +220,13 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	svr.rc.HTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
 	svr.rc.IdentityHTTPGroupCtl = group.NewHTTPGroupController(svr.httpVhostRouter)
 
-	// A name is an http name or a tcp-tls route; the embedder routes the
-	// tcp-tls ones.
+	// A name is one client identity's, and an http name or a tcp-tls
+	// route; the embedder routes the tcp-tls ones. A request for an http
+	// name never goes to another identity's wildcard.
 	svr.rc.DomainClaims = group.NewDomainClaims()
 	svr.rc.DomainClaims.OnConflict = cfg.OnDomainConflict
 	svr.rc.DomainClaims.Reserved = cfg.ReservedDomain
+	svr.httpVhostRouter.Owner = svr.rc.DomainClaims.Owner
 	svr.rc.TCPTLSRoutes = group.NewTCPTLSRoutes(svr.rc.DomainClaims, cfg.OnTCPTLSDomain)
 
 	// Init TCP mux group controller

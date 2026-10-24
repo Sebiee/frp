@@ -3,6 +3,7 @@ package vhost
 import (
 	"cmp"
 	"errors"
+	"iter"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,11 @@ type Routers struct {
 	// OnDomain is called when a domain is inserted into indexByDomain and
 	// when that entry is deleted. added is true for the insert.
 	OnDomain func(domain string, added bool)
+	// Owner, when set, names the client identity a domain belongs to, if
+	// any. A request for a domain that belongs to one goes to no other
+	// identity's wildcard domain: not for a path or HTTP user its routes
+	// miss, nor while it has none. It is called with the routers locked.
+	Owner func(domain string) (identity string, ok bool)
 
 	mutex sync.RWMutex
 }
@@ -149,28 +155,53 @@ func (r *Routers) getByRoute(host, path, httpUser string) (*Router, bool) {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	// First we check the full hostname; if it doesn't exist, then check wildcard domains.
-	// For example, test.example.com checks *.example.com before falling back to "*".
 	vr, ok := r.getExactOrAllUsersLocked(host, path, httpUser)
 	if ok {
 		return vr, true
 	}
-
-	hostSplit := strings.Split(host, ".")
-	// Keep two-label hosts out of the wildcard walk, so example.com does not match *.com.
-	for len(hostSplit) >= 3 {
-		// Replace the leftmost remaining label with the wildcard marker.
-		hostSplit[0] = "*"
-		host = strings.Join(hostSplit, ".")
-		vr, ok = r.getExactOrAllUsersLocked(host, path, httpUser)
-		if ok {
-			return vr, true
+	// A host that belongs to an identity takes only that identity's
+	// wildcards: another's would get the requests its own routes miss.
+	owner, owned := r.owner(host)
+	for wildcard := range wildcards(host) {
+		vr, ok = r.getExactOrAllUsersLocked(wildcard, path, httpUser)
+		if !ok {
+			continue
 		}
-		hostSplit = hostSplit[1:]
+		if owned {
+			if wildcardOwner, ok := r.owner(wildcard); !ok || wildcardOwner != owner {
+				continue
+			}
+		}
+		return vr, true
 	}
+	return nil, false
+}
 
-	// Finally, try to check if there is one proxy whose domain is "*", which means match all domains.
-	return r.getExactOrAllUsersLocked("*", path, httpUser)
+// wildcards are the wildcard domains that may route host, the longest
+// first: test.example.com's are *.example.com, then "*", which routes
+// every domain. A two-label host has only "*", so example.com does not
+// match *.com.
+func wildcards(host string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for rest := host; ; {
+			i := strings.IndexByte(rest, '.')
+			if i < 0 || !strings.Contains(rest[i+1:], ".") {
+				break
+			}
+			rest = rest[i+1:]
+			if !yield("*." + rest) {
+				return
+			}
+		}
+		yield("*")
+	}
+}
+
+func (r *Routers) owner(domain string) (string, bool) {
+	if r.Owner == nil {
+		return "", false
+	}
+	return r.Owner(domain)
 }
 
 func (r *Routers) getExactOrAllUsersLocked(host, path, httpUser string) (*Router, bool) {

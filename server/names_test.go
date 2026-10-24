@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -138,6 +139,37 @@ func TestNamesAreCanonical(t *testing.T) {
 	require.Equal(t, []string{"app.example.com", "*.example.org"}, added)
 	require.Equal(t, "node", reach(svr, "app.example.com", "/", ""))
 	require.Equal(t, "node", reach(svr, "x.example.org", "/", ""))
+}
+
+func TestExactNameMissesStayWithItsIdentity(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	_, err := publish(t, svr, "wild", httpProxy("wild", "*.example.com", ""))
+	require.NoError(t, err)
+	leave, err := publish(t, svr, "victim", httpProxy("app", "app.example.com", "", "/api"))
+	require.NoError(t, err)
+	_, err = publish(t, svr, "victim", httpProxy("vault", "vault.example.com", "alice"))
+	require.NoError(t, err)
+
+	for _, c := range []struct{ host, path, user, want string }{
+		{"app.example.com", "/api/items", "", "victim"},
+		{"app.example.com", "/login", "", "none"},
+		{"app.example.com", "/", "", "none"},
+		{"vault.example.com", "/", "alice", "victim"},
+		{"vault.example.com", "/", "bob", "none"},
+		{"vault.example.com", "/", "", "none"},
+		{"other.example.com", "/", "", "wild"},
+	} {
+		require.Equal(t, c.want, reach(svr, c.host, c.path, c.user), fmt.Sprintf("%s%s user=%q", c.host, c.path, c.user))
+	}
+
+	leave()
+	require.Equal(t, "none", reach(svr, "app.example.com", "/api/items", ""), "while its tunnel is away")
+
+	_, err = publish(t, svr, "victim", httpProxy("wild2", "*.example.org", ""))
+	require.NoError(t, err)
+	_, err = publish(t, svr, "victim", httpProxy("api", "api.example.org", "", "/v1"))
+	require.NoError(t, err)
+	require.Equal(t, "victim", reach(svr, "api.example.org", "/", ""), "its own wildcard still takes its misses")
 }
 
 func TestNameWaitsForItsIdentity(t *testing.T) {
