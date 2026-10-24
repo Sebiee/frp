@@ -124,6 +124,26 @@ func TestWorkConnTransportTimesOutAsANetError(t *testing.T) {
 	}
 }
 
+func TestWorkConnTransportGivesUpOnAnOriginThatStopsReading(t *testing.T) {
+	tr := pipeTransport(func(o net.Conn) { io.CopyN(io.Discard, o, 64<<10) })
+	tr.responseHeaderTimeout = 200 * time.Millisecond
+	req, _ := http.NewRequest(http.MethodPost, "http://app.example.com/", strings.NewReader(strings.Repeat("a", 1<<20)))
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.RoundTrip(req)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("err %v, want a net.Error that times out (504)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request is still being written to an origin that stopped reading")
+	}
+}
+
 func TestWorkConnTransportClosesWhenTheVisitorLeaves(t *testing.T) {
 	sent := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
