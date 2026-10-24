@@ -139,3 +139,29 @@ func TestNamesAreCanonical(t *testing.T) {
 	require.Equal(t, "node", reach(svr, "app.example.com", "/", ""))
 	require.Equal(t, "node", reach(svr, "x.example.org", "/", ""))
 }
+
+func TestNameWaitsForItsIdentity(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	leave, err := publish(t, svr, "victim", httpProxy("web", "app.example.com", ""))
+	require.NoError(t, err)
+	leaveDB, err := publish(t, svr, "victim", tcpTLSProxy("db", "db.example.com"))
+	require.NoError(t, err)
+	leave()
+	leaveDB()
+
+	for _, pc := range []v1.ProxyConfigurer{
+		httpProxy("web", "app.example.com", ""),
+		tcpTLSProxy("tcp", "app.example.com"),
+		httpProxy("db", "db.example.com", ""),
+		tcpTLSProxy("db", "db.example.com"),
+	} {
+		_, err := publish(t, svr, "attacker", pc)
+		require.Error(t, err, pc.GetBaseConfig().Name)
+	}
+
+	_, err = publish(t, svr, "victim", httpProxy("web", "app.example.com", ""))
+	require.NoError(t, err, "its owner gets it back")
+	require.Equal(t, "victim", reach(svr, "app.example.com", "/", ""))
+	_, err = publish(t, svr, "victim", httpProxy("db", "db.example.com", ""))
+	require.NoError(t, err, "as either kind")
+}

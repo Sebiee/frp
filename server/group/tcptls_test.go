@@ -5,6 +5,8 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -64,8 +66,10 @@ func TestTCPTLSRoutesGroupByIdentity(t *testing.T) {
 	_, err = rt.Dial(nil)
 	require.ErrorIs(err, ErrTCPTLSNoRoute)
 
-	// The name is free again, for anyone.
+	// The name stays node/1's for the grace.
 	_, err = r.Register("c", "node/2", "db.example.com", nil, dialer("c", &calls, nil))
+	require.ErrorContains(err, "another client")
+	_, err = r.Register("a", "node/1", "db.example.com", nil, dialer("a", &calls, nil))
 	require.NoError(err)
 }
 
@@ -159,8 +163,43 @@ func TestDomainClaimsOneIdentity(t *testing.T) {
 	_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
 	require.ErrorAs(err, &owned, "while any claim of node/1 is held")
 	rel2()
-	_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
-	require.NoError(err)
+}
+
+// A name stays its identity's for the grace after its last claim goes,
+// as either kind; then anyone may have it.
+func TestDomainClaimsGrace(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		c := NewDomainClaims()
+		var owned *DomainOwnedError
+
+		_, rel, err := c.Claim("app.example.com", DomainKindHTTP, "node/1")
+		require.NoError(err)
+		rel()
+		time.Sleep(10*time.Minute - time.Second)
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+		require.ErrorAs(err, &owned)
+		_, _, err = c.Claim("app.example.com", DomainKindTCPTLS, "node/2")
+		require.ErrorAs(err, &owned)
+
+		_, rel, err = c.Claim("app.example.com", DomainKindTCPTLS, "node/1")
+		require.NoError(err, "its identity has it back, as either kind")
+		time.Sleep(time.Hour)
+		_, _, err = c.Claim("app.example.com", DomainKindTCPTLS, "node/2")
+		require.ErrorAs(err, &owned, "held: the grace starts when the last claim goes")
+		rel()
+		time.Sleep(10*time.Minute - time.Second)
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+		require.ErrorAs(err, &owned)
+
+		time.Sleep(time.Second)
+		synctest.Wait()
+		c.mu.Lock()
+		require.Empty(c.m, "forgotten once the grace is up")
+		c.mu.Unlock()
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
+		require.NoError(err)
+	})
 }
 
 // A name is claimed and routed in one spelling: frps and its embedder
@@ -233,7 +272,9 @@ func TestTCPTLSRoutesALPNInAnyOrder(t *testing.T) {
 // A stream whose handshake was for one group never goes to another
 // that took the name since.
 func TestTCPTLSRouteDialStaysInItsGroup(t *testing.T) {
-	r := NewTCPTLSRoutes(NewDomainClaims(), nil)
+	claims := NewDomainClaims()
+	claims.Grace = 0
+	r := NewTCPTLSRoutes(claims, nil)
 	var calls []string
 	un, err := r.Register("a", "node/1", "db.example.com", nil, dialer("a", &calls, nil))
 	require.NoError(t, err)

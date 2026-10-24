@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -28,7 +29,7 @@ func (e *DomainClaimedError) Error() string {
 }
 
 // DomainOwnedError refuses a proxy whose name another client identity
-// holds.
+// holds, or held within DomainClaims.Grace.
 type DomainOwnedError struct {
 	Domain string
 }
@@ -42,6 +43,7 @@ func (e *DomainOwnedError) Error() string {
 // any proxy has it: all of a name's locations, HTTP users and routes are
 // one identity's. The first to claim a name keeps it; another identity,
 // and the other kind, are refused until the last claim is released.
+// Another identity is refused for Grace after that too.
 type DomainClaims struct {
 	// OnConflict, when set, is told of each claim refused because the
 	// other kind holds the name.
@@ -49,6 +51,11 @@ type DomainClaims struct {
 	// Reserved, when set, are names no proxy may claim: an embedder's
 	// own, such as the name its clients log in on.
 	Reserved func(domain string) bool
+	// Grace is how long a name stays its identity's after its last claim
+	// is released, as either kind: the identity's client reconnecting,
+	// or restarting, finds its names its own. NewDomainClaims sets 10
+	// minutes.
+	Grace time.Duration
 
 	mu sync.Mutex
 	m  map[string]*domainClaim
@@ -58,17 +65,27 @@ type domainClaim struct {
 	identity string
 	kind     string
 	n        int
+	// With n 0, until is when the name stops being identity's, and
+	// expiry forgets it then.
+	until  time.Time
+	expiry *time.Timer
+}
+
+// held is whether cl's identity still holds the name at now.
+func (cl *domainClaim) held(now time.Time) bool {
+	return cl.n > 0 || now.Before(cl.until)
 }
 
 func NewDomainClaims() *DomainClaims {
-	return &DomainClaims{m: make(map[string]*domainClaim)}
+	return &DomainClaims{Grace: 10 * time.Minute, m: make(map[string]*domainClaim)}
 }
 
 // Claim holds domain, as name, for kind and the client identity until
 // release is called. name is its canonical form (canonicalDomain), the
 // one to route by. It refuses a name that has none, a reserved one, one
 // the other kind holds, with a *DomainClaimedError, and one another
-// identity holds, with a *DomainOwnedError. A nil c claims nothing.
+// identity holds or held within Grace, with a *DomainOwnedError. A nil
+// c claims nothing.
 func (c *DomainClaims) Claim(domain, kind, identity string) (name string, release func(), err error) {
 	name, err = canonicalDomain(domain, kind)
 	if err != nil {
@@ -82,11 +99,14 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 	}
 	c.mu.Lock()
 	cl := c.m[name]
+	if cl != nil && !cl.held(time.Now()) {
+		cl = nil
+	}
 	switch {
 	case cl == nil:
-		cl = &domainClaim{identity: identity, kind: kind}
+		cl = &domainClaim{identity: identity}
 		c.m[name] = cl
-	case cl.kind != kind:
+	case cl.n > 0 && cl.kind != kind:
 		holder := cl.kind
 		c.mu.Unlock()
 		if c.OnConflict != nil {
@@ -97,18 +117,38 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 		c.mu.Unlock()
 		return "", nil, &DomainOwnedError{Domain: name}
 	}
+	cl.kind = kind
 	cl.n++
 	c.mu.Unlock()
 	var once sync.Once
-	return name, func() {
-		once.Do(func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			if cl.n--; cl.n == 0 && c.m[name] == cl {
-				delete(c.m, name)
-			}
-		})
-	}, nil
+	return name, func() { once.Do(func() { c.release(name, cl) }) }, nil
+}
+
+func (c *DomainClaims) release(name string, cl *domainClaim) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cl.n--; cl.n > 0 || c.m[name] != cl {
+		return
+	}
+	if c.Grace <= 0 {
+		delete(c.m, name)
+		return
+	}
+	cl.until = time.Now().Add(c.Grace)
+	if cl.expiry == nil {
+		cl.expiry = time.AfterFunc(c.Grace, func() { c.expire(name, cl) })
+	} else {
+		cl.expiry.Reset(c.Grace)
+	}
+}
+
+// expire forgets cl's name once its grace is up.
+func (c *DomainClaims) expire(name string, cl *domainClaim) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m[name] == cl && !cl.held(time.Now()) {
+		delete(c.m, name)
+	}
 }
 
 // canonicalDomain is domain as frps keys and routes it, in lower case.

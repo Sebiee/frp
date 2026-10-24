@@ -87,7 +87,8 @@ type ServerConfig struct {
 	// the same domain, location, and HTTP user share the route, and the
 	// requests are spread across them, whatever load balancer group they
 	// asked for. A name is one identity's: another cannot add a location
-	// or an HTTP user to it, nor have it as a tcp-tls route. Its work
+	// or an HTTP user to it, nor have it as a tcp-tls route, until 10
+	// minutes after the identity's last proxy for it left. Its work
 	// connections must come with the same identity, and a login cannot
 	// replace a control of another identity. Not serialized. For
 	// in-process embedders.
