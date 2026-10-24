@@ -2,6 +2,7 @@ package group
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -199,6 +200,47 @@ func TestDomainClaimsGrace(t *testing.T) {
 		c.mu.Unlock()
 		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "node/2")
 		require.NoError(err)
+	})
+}
+
+// An identity whose names come and go keeps at most maxGraced of them
+// in their grace; others' graces are their own.
+func TestDomainClaimsGraceIsBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		c := NewDomainClaims()
+		var owned *DomainOwnedError
+		_, rel, err := c.Claim("app.example.com", DomainKindHTTP, "victim")
+		require.NoError(err)
+		rel()
+		for i := range maxGraced + 1 {
+			_, rel, err := c.Claim(fmt.Sprintf("n%d.example.com", i), DomainKindHTTP, "churn")
+			require.NoError(err)
+			rel()
+		}
+
+		_, _, err = c.Claim(fmt.Sprintf("n%d.example.com", maxGraced-1), DomainKindHTTP, "other")
+		require.ErrorAs(err, &owned)
+		_, _, err = c.Claim(fmt.Sprintf("n%d.example.com", maxGraced), DomainKindHTTP, "other")
+		require.NoError(err, "past its bound, a name is free at once")
+		_, _, err = c.Claim("app.example.com", DomainKindHTTP, "other")
+		require.ErrorAs(err, &owned)
+
+		_, rel, err = c.Claim("n0.example.com", DomainKindHTTP, "churn")
+		require.NoError(err)
+		_, rel2, err := c.Claim(fmt.Sprintf("n%d.example.com", maxGraced+1), DomainKindHTTP, "churn")
+		require.NoError(err)
+		rel2()
+		_, _, err = c.Claim(fmt.Sprintf("n%d.example.com", maxGraced+1), DomainKindHTTP, "other")
+		require.ErrorAs(err, &owned, "a name taken back leaves its place in the grace")
+		rel()
+
+		time.Sleep(10 * time.Minute)
+		synctest.Wait()
+		c.mu.Lock()
+		require.Len(c.m, 1, "the name other still holds")
+		require.Empty(c.graced)
+		c.mu.Unlock()
 	})
 }
 

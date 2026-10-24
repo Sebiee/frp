@@ -54,12 +54,18 @@ type DomainClaims struct {
 	// Grace is how long a name stays its identity's after its last claim
 	// is released, as either kind: the identity's client reconnecting,
 	// or restarting, finds its names its own. NewDomainClaims sets 10
-	// minutes.
+	// minutes. An identity has at most maxGraced names in their grace; a
+	// name it releases beyond that is free at once.
 	Grace time.Duration
 
-	mu sync.RWMutex
-	m  map[string]*domainClaim
+	mu     sync.RWMutex
+	m      map[string]*domainClaim
+	graced map[string]int // each identity's names in their grace
 }
+
+// maxGraced bounds an identity's names in their grace: an identity whose
+// proxies come and go cannot fill memory with names it once held.
+const maxGraced = 4096
 
 type domainClaim struct {
 	identity string
@@ -77,7 +83,7 @@ func (cl *domainClaim) held(now time.Time) bool {
 }
 
 func NewDomainClaims() *DomainClaims {
-	return &DomainClaims{Grace: 10 * time.Minute, m: make(map[string]*domainClaim)}
+	return &DomainClaims{Grace: 10 * time.Minute, m: make(map[string]*domainClaim), graced: make(map[string]int)}
 }
 
 // Claim holds domain, as name, for kind and the client identity until
@@ -100,6 +106,7 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 	c.mu.Lock()
 	cl := c.m[name]
 	if cl != nil && !cl.held(time.Now()) {
+		c.forget(name, cl)
 		cl = nil
 	}
 	switch {
@@ -116,6 +123,8 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 	case cl.identity != identity:
 		c.mu.Unlock()
 		return "", nil, &DomainOwnedError{Domain: name}
+	case cl.n == 0:
+		c.ungrace(identity)
 	}
 	cl.kind = kind
 	cl.n++
@@ -130,10 +139,11 @@ func (c *DomainClaims) release(name string, cl *domainClaim) {
 	if cl.n--; cl.n > 0 || c.m[name] != cl {
 		return
 	}
-	if c.Grace <= 0 {
+	if c.Grace <= 0 || c.graced[cl.identity] >= maxGraced {
 		delete(c.m, name)
 		return
 	}
+	c.graced[cl.identity]++
 	cl.until = time.Now().Add(c.Grace)
 	if cl.expiry == nil {
 		cl.expiry = time.AfterFunc(c.Grace, func() { c.expire(name, cl) })
@@ -147,7 +157,20 @@ func (c *DomainClaims) expire(name string, cl *domainClaim) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.m[name] == cl && !cl.held(time.Now()) {
-		delete(c.m, name)
+		c.forget(name, cl)
+	}
+}
+
+// forget drops name, whose claim cl is in its grace.
+func (c *DomainClaims) forget(name string, cl *domainClaim) {
+	delete(c.m, name)
+	c.ungrace(cl.identity)
+}
+
+// ungrace counts one name fewer in identity's grace.
+func (c *DomainClaims) ungrace(identity string) {
+	if c.graced[identity]--; c.graced[identity] == 0 {
+		delete(c.graced, identity)
 	}
 }
 
