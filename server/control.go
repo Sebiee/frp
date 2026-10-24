@@ -771,9 +771,13 @@ func (ctl *Control) worker() {
 func (ctl *Control) registerMsgHandlers() {
 	ctl.msgDispatcher.RegisterHandler(&msg.NewProxy{}, ctl.handleNewProxy)
 	ctl.msgDispatcher.RegisterHandler(&msg.Ping{}, ctl.handlePing)
-	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleVisitor{}, msg.AsyncHandler(ctl.handleNatHoleVisitor))
-	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleClient{}, msg.AsyncHandler(ctl.handleNatHoleClient))
-	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleReport{}, msg.AsyncHandler(ctl.handleNatHoleReport))
+	// NAT holes serve xtcp, which a client with an identity cannot
+	// register: its NAT hole messages are dropped.
+	if ctl.identity == "" {
+		ctl.msgDispatcher.RegisterHandler(&msg.NatHoleVisitor{}, msg.AsyncHandler(ctl.handleNatHoleVisitor))
+		ctl.msgDispatcher.RegisterHandler(&msg.NatHoleClient{}, msg.AsyncHandler(ctl.handleNatHoleClient))
+		ctl.msgDispatcher.RegisterHandler(&msg.NatHoleReport{}, msg.AsyncHandler(ctl.handleNatHoleReport))
+	}
 	ctl.msgDispatcher.RegisterHandler(&msg.CloseProxy{}, ctl.handleCloseProxy)
 }
 
@@ -864,6 +868,12 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 	// Load configures from NewProxy message and validate.
 	pxyConf, err = config.NewProxyConfigurerFromMsg(pxyMsg, ctl.sessionCtx.ServerCfg)
 	if err != nil {
+		return
+	}
+	// A client with an identity may have http and tcp-tls proxies only:
+	// the others have frps listen on its ports, or relay between clients.
+	if typ := v1.ProxyType(pxyConf.GetBaseConfig().Type); ctl.identity != "" && typ != v1.ProxyTypeHTTP && typ != v1.ProxyTypeTCPTLS {
+		err = fmt.Errorf("proxy type [%s] is not allowed for a client with an identity", typ)
 		return
 	}
 

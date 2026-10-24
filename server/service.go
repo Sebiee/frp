@@ -963,6 +963,9 @@ func (svr *Service) RegisterWorkConn(
 }
 
 func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVisitorConn, wireProtocol string) error {
+	if netpkg.IdentityFromContext(netpkg.NewContextFromConn(visitorConn)) != "" {
+		return fmt.Errorf("a client with an identity cannot open visitor connections")
+	}
 	admit := func(visitorUser, visitorWireProtocol, visitorUDPPacketCodec string) error {
 		if visitorWireProtocol == "" {
 			visitorWireProtocol = wireProtocol
