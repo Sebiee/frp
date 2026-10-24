@@ -1,0 +1,231 @@
+// Copyright 2026 The frp Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package server
+
+import (
+	"errors"
+	"io"
+	"net"
+	"reflect"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/yamux"
+	"github.com/stretchr/testify/require"
+
+	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/msg"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
+	"github.com/fatedier/frp/pkg/util/util"
+)
+
+// identityConn is a connection whose client an embedder authenticated
+// before frps saw it, as its mutual TLS would.
+type identityConn struct {
+	net.Conn
+	identity string
+}
+
+// connListener hands frps the connections a test dials.
+type connListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *connListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *connListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*connListener) Addr() net.Addr { return lifecycleTestAddr("embedder") }
+
+// identityServer runs frps for an embedder that names its clients
+// (ServerConfig.Identity), and returns how a client of an identity, ""
+// for none, opens a session to it.
+func identityServer(t *testing.T) func(identity string) *yamux.Session {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+
+	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: port, VhostHTTPPort: port, EnableTCPTLS: true}
+	cfg.Identity = func(c net.Conn) string {
+		if ic, ok := c.(*identityConn); ok {
+			return ic.identity
+		}
+		return ""
+	}
+	require.NoError(t, cfg.Complete())
+	svr, err := NewService(cfg)
+	require.NoError(t, err)
+	ln := &connListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+	go svr.HandleListener(ln, false)
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = svr.Close()
+	})
+
+	return func(identity string) *yamux.Session {
+		c, s := net.Pipe()
+		ln.conns <- &identityConn{Conn: s, identity: identity}
+		sess, err := yamux.Client(c, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sess.Close() })
+		return sess
+	}
+}
+
+// testClient is a client logged in on a session, with its control.
+type testClient struct {
+	t      *testing.T
+	sess   *yamux.Session
+	stream *yamux.Stream
+	ctl    io.ReadWriter // encrypted after the login
+	runID  string
+}
+
+// login logs in on sess with m, and returns frps's refusal if it refused.
+func login(t *testing.T, sess *yamux.Session, m msg.Login) (*testClient, error) {
+	t.Helper()
+	s, err := sess.OpenStream()
+	require.NoError(t, err)
+	ts := time.Now().Unix()
+	m.PrivilegeKey, m.Timestamp = util.GetAuthKey("", ts), ts
+	require.NoError(t, msg.WriteMsg(s, &m))
+	_ = s.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var resp msg.LoginResp
+	require.NoError(t, msg.ReadMsgInto(s, &resp))
+	_ = s.SetReadDeadline(time.Time{})
+	if resp.Error != "" {
+		_ = s.Close()
+		return nil, errors.New(resp.Error)
+	}
+	rw, err := netpkg.NewCryptoReadWriter(s, nil)
+	require.NoError(t, err)
+	return &testClient{t: t, sess: sess, stream: s, ctl: rw, runID: resp.RunID}, nil
+}
+
+// send writes m on the control.
+func (c *testClient) send(m msg.Message) {
+	c.t.Helper()
+	require.NoError(c.t, msg.WriteMsg(c.ctl, m))
+}
+
+// await reads the control until a message of want's type, false if none
+// comes within d. The control is unusable after false.
+func (c *testClient) await(want msg.Message, d time.Duration) (msg.Message, bool) {
+	_ = c.stream.SetReadDeadline(time.Now().Add(d))
+	defer func() { _ = c.stream.SetReadDeadline(time.Time{}) }()
+	for {
+		m, err := msg.ReadMsg(c.ctl)
+		if err != nil {
+			return nil, false
+		}
+		if reflect.TypeOf(m) == reflect.TypeOf(want) {
+			return m, true
+		}
+	}
+}
+
+// newProxy asks for proxy m, and returns frps's refusal if it refused.
+func (c *testClient) newProxy(m msg.NewProxy) error {
+	c.t.Helper()
+	c.send(&m)
+	got, ok := c.await(&msg.NewProxyResp{}, 5*time.Second)
+	require.True(c.t, ok, "no answer to proxy [%s]", m.ProxyName)
+	if resp := got.(*msg.NewProxyResp); resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// visit opens a visitor connection to proxy name on sess, as the client
+// of runID, and returns frps's refusal if it refused.
+func visit(t *testing.T, sess *yamux.Session, runID, name, sk string) error {
+	t.Helper()
+	s, err := sess.OpenStream()
+	require.NoError(t, err)
+	defer s.Close()
+	ts := time.Now().Unix()
+	require.NoError(t, msg.WriteMsg(s, &msg.NewVisitorConn{RunID: runID, ProxyName: name, SignKey: util.GetAuthKey(sk, ts), Timestamp: ts}))
+	_ = s.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var resp msg.NewVisitorConnResp
+	require.NoError(t, msg.ReadMsgInto(s, &resp))
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func TestIdentityClientsRegisterOnlyHTTPAndTCPTLSProxies(t *testing.T) {
+	dial := identityServer(t)
+	node, err := login(t, dial("node/a"), msg.Login{})
+	require.NoError(t, err)
+	require.NoError(t, node.newProxy(msg.NewProxy{ProxyName: "web", ProxyType: "http", CustomDomains: []string{"app.example.com"}}))
+	require.NoError(t, node.newProxy(msg.NewProxy{ProxyName: "db", ProxyType: "tcp-tls", CustomDomains: []string{"db.example.com"}}))
+	for _, typ := range []string{"tcp", "udp", "stcp", "sudp", "xtcp"} {
+		require.Error(t, node.newProxy(msg.NewProxy{ProxyName: "node-" + typ, ProxyType: typ, Sk: "key"}), typ)
+	}
+
+	plain, err := login(t, dial(""), msg.Login{})
+	require.NoError(t, err)
+	for _, typ := range []string{"tcp", "stcp"} {
+		require.NoError(t, plain.newProxy(msg.NewProxy{ProxyName: "plain-" + typ, ProxyType: typ, Sk: "key"}), typ)
+	}
+}
+
+func TestIdentityClientsCannotVisit(t *testing.T) {
+	dial := identityServer(t)
+	plainSess := dial("")
+	plain, err := login(t, plainSess, msg.Login{})
+	require.NoError(t, err)
+	require.NoError(t, plain.newProxy(msg.NewProxy{ProxyName: "secret", ProxyType: "stcp", Sk: "key", AllowUsers: []string{"*"}}))
+	require.NoError(t, visit(t, plainSess, plain.runID, "secret", "key"))
+
+	nodeSess := dial("node/a")
+	node, err := login(t, nodeSess, msg.Login{})
+	require.NoError(t, err)
+	require.Error(t, visit(t, nodeSess, node.runID, "secret", "key"))
+	require.Error(t, visit(t, nodeSess, plain.runID, "secret", "key"))
+}
+
+func TestIdentityClientsCannotPunchHoles(t *testing.T) {
+	dial := identityServer(t)
+	hole := &msg.NatHoleVisitor{TransactionID: "t", ProxyName: "none", PreCheck: true}
+
+	plain, err := login(t, dial(""), msg.Login{})
+	require.NoError(t, err)
+	plain.send(hole)
+	_, ok := plain.await(&msg.NatHoleResp{}, 5*time.Second)
+	require.True(t, ok, "a client with no identity is answered")
+
+	node, err := login(t, dial("node/a"), msg.Login{})
+	require.NoError(t, err)
+	node.send(hole)
+	_, ok = node.await(&msg.NatHoleResp{}, 500*time.Millisecond)
+	require.False(t, ok, "a client with an identity is not")
+}
