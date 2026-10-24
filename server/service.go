@@ -927,13 +927,18 @@ func (svr *Service) RegisterControl(
 	}
 
 	ctx := netpkg.NewContextFromConn(ctlConn)
-	if netpkg.IdentityFromContext(ctx) != "" {
+	identity := netpkg.IdentityFromContext(ctx)
+	if identity != "" {
 		if err := validateLogin(loginMsg); err != nil {
 			return nil, fmt.Errorf("invalid login: %w", err)
 		}
 	}
 	xl := xlog.FromContextSafe(ctx)
 	xl.AppendPrefix(loginMsg.RunID)
+	if identity != "" {
+		// Another identity's client may have the same run id.
+		xl.AppendPrefix(identity)
+	}
 	ctx = xlog.NewContext(ctx, xl)
 	xl.Infof("client login info: ip [%s] version [%s] hostname [%s] os [%s] arch [%s]",
 		ctlConn.RemoteAddr().String(), loginMsg.Version, loginMsg.Hostname, loginMsg.Os, loginMsg.Arch)
