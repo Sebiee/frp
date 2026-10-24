@@ -253,6 +253,23 @@ func TestRoutersGetByRouteOwnedDomain(t *testing.T) {
 	}
 }
 
+func TestRoutersDomainRoutesAreBounded(t *testing.T) {
+	routers := NewRouters()
+	for i := range 63 {
+		require.NoError(t, routers.Add("app.example.com", fmt.Sprintf("/p%d", i), "", i))
+	}
+	require.NoError(t, routers.Add("app.example.com", "", "alice", "alice"))
+	require.Error(t, routers.Add("app.example.com", "/more", "", "more"))
+	require.Error(t, routers.Add("app.example.com", "", "bob", "bob"))
+	require.NoError(t, routers.Add("other.example.com", "/more", "", "other"))
+
+	routers.Del("app.example.com", "/p0", "")
+	require.NoError(t, routers.Add("app.example.com", "/more", "", "more"))
+	vr, ok := routers.getByRoute("app.example.com", "/more", "")
+	require.True(t, ok)
+	require.Equal(t, "more", vr.payload)
+}
+
 func TestRoutersConcurrentGetByRouteAndAdd(t *testing.T) {
 	routers := NewRouters()
 	require.NoError(t, routers.Add("*.example.com", "/api", "", "wildcard"))

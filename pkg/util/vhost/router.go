@@ -3,6 +3,7 @@ package vhost
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"iter"
 	"slices"
 	"strings"
@@ -10,6 +11,13 @@ import (
 )
 
 var ErrRouterConfigConflict = errors.New("router config conflict")
+
+// maxRoutesPerDomain bounds a domain's routes, every location of every
+// HTTP user: Add and Del sort and copy them, and each request scans
+// them, under the routers' lock.
+const maxRoutesPerDomain = 64
+
+var errDomainFull = fmt.Errorf("router: a domain has at most %d routes", maxRoutesPerDomain)
 
 type routerByHTTPUser map[string][]*Router
 
@@ -54,6 +62,13 @@ func (r *Routers) Add(domain, location, httpUser string, payload any) error {
 	}
 
 	routersByHTTPUser, domainAlreadyKnown := r.indexByDomain[domain]
+	routes := 0
+	for _, vrs := range routersByHTTPUser {
+		routes += len(vrs)
+	}
+	if routes >= maxRoutesPerDomain {
+		return errDomainFull
+	}
 	if !domainAlreadyKnown {
 		routersByHTTPUser = make(map[string][]*Router)
 	}

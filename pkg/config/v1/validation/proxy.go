@@ -17,6 +17,7 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 
@@ -150,7 +151,30 @@ func validateTCPMuxProxyConfigForClient(c *v1.TCPMuxProxyConfig) error {
 }
 
 func validateHTTPProxyConfigForClient(c *v1.HTTPProxyConfig) error {
+	if err := validateLocations(c.Locations); err != nil {
+		return err
+	}
 	return validateDomainConfigForClient(&c.DomainConfig)
+}
+
+// maxLocations bounds an http proxy's locations, as the server's router
+// bounds a domain's routes.
+const maxLocations = 64
+
+// validateLocations refuses more than maxLocations, and a location that
+// is not "" (every path) or a clean path prefix: from "/", with no
+// empty, "." or ".." segment.
+func validateLocations(locations []string) error {
+	if len(locations) > maxLocations {
+		return fmt.Errorf("locations: at most %d", maxLocations)
+	}
+	for _, l := range locations {
+		p := strings.TrimSuffix(l, "/")
+		if l != "" && l != "/" && (p == "/" || !strings.HasPrefix(p, "/") || path.Clean(p) != p) {
+			return fmt.Errorf("location [%s]: want a path from /, with no empty, . or .. segment", l)
+		}
+	}
+	return nil
 }
 
 func validateHTTPSProxyConfigForClient(c *v1.HTTPSProxyConfig) error {
@@ -219,6 +243,9 @@ func validateTCPMuxProxyConfigForServer(c *v1.TCPMuxProxyConfig, s *v1.ServerCon
 func validateHTTPProxyConfigForServer(c *v1.HTTPProxyConfig, s *v1.ServerConfig) error {
 	if s.VhostHTTPPort == 0 {
 		return fmt.Errorf("type [http] not supported when vhost http port is not set")
+	}
+	if err := validateLocations(c.Locations); err != nil {
+		return err
 	}
 
 	return validateDomainConfigForServer(&c.DomainConfig, s)

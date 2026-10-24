@@ -15,6 +15,7 @@
 package validation
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -72,5 +73,32 @@ func TestValidateDomainConfigForServerRejectsSubdomainHostCaseInsensitively(t *t
 			}
 			require.NoError(t, err)
 		})
+	}
+}
+
+func TestValidateHTTPProxyLocations(t *testing.T) {
+	s := &v1.ServerConfig{VhostHTTPPort: 80}
+	proxy := func(locations ...string) *v1.HTTPProxyConfig {
+		c := &v1.HTTPProxyConfig{DomainConfig: v1.DomainConfig{CustomDomains: []string{"app.example.com"}}, Locations: locations}
+		c.Name, c.Type, c.LocalPort = "web", "http", 8080
+		c.Complete()
+		return c
+	}
+	many := make([]string, 65)
+	for i := range many {
+		many[i] = fmt.Sprintf("/p%d", i)
+	}
+	for _, c := range []*v1.HTTPProxyConfig{
+		proxy(many...),
+		proxy("api"), proxy("//"), proxy("//api"), proxy("/api//v1"), proxy("/a/../api"), proxy("/a/./b"), proxy("/."), proxy("/api/.."),
+	} {
+		require.Error(t, ValidateProxyConfigurerForServer(c, s), c.Locations)
+		require.Error(t, ValidateProxyConfigurerForClient(c), c.Locations)
+	}
+	for _, c := range []*v1.HTTPProxyConfig{
+		proxy(), proxy(many[:64]...), proxy("", "/", "/api", "/api/", "/static/css", "/a%2fb", "/.well-known/x"),
+	} {
+		require.NoError(t, ValidateProxyConfigurerForServer(c, s), c.Locations)
+		require.NoError(t, ValidateProxyConfigurerForClient(c), c.Locations)
 	}
 }

@@ -197,3 +197,31 @@ func TestNameWaitsForItsIdentity(t *testing.T) {
 	_, err = publish(t, svr, "victim", httpProxy("db", "db.example.com", ""))
 	require.NoError(t, err, "as either kind")
 }
+
+func TestLocationsAreBounded(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	locations := func(from, n int) []string {
+		var l []string
+		for i := range n {
+			l = append(l, fmt.Sprintf("/p%d", from+i))
+		}
+		return l
+	}
+	_, err := publish(t, svr, "node", httpProxy("many", "a.example.com", "", locations(0, 65)...))
+	require.Error(t, err)
+	for _, l := range []string{"//admin", "admin", "/a/../admin", "/a/./b", "/a//b", "/."} {
+		_, err := publish(t, svr, "node", httpProxy("unclean", "b.example.com", "", l))
+		require.Error(t, err, l)
+	}
+
+	_, err = publish(t, svr, "node", httpProxy("full", "c.example.com", "", locations(0, 64)...))
+	require.NoError(t, err)
+	_, err = publish(t, svr, "node", httpProxy("more", "c.example.com", "", "/more"))
+	require.Error(t, err, "a domain has at most 64 routes")
+	_, err = publish(t, svr, "node", httpProxy("user", "c.example.com", "alice"))
+	require.Error(t, err, "of all its HTTP users")
+	require.Equal(t, "node", reach(svr, "c.example.com", "/p63", ""))
+
+	_, err = publish(t, svr, "node", httpProxy("clean", "d.example.com", "", "", "/", "/api/", "/static"))
+	require.NoError(t, err)
+}
