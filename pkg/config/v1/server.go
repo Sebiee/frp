@@ -97,8 +97,10 @@ type ServerConfig struct {
 	// holes. frps grants its streams 256 KiB receive windows, not 6 MiB
 	// (on QUIC, all clients' when QUICIdentity is set). Its login's text
 	// fields are short and printable (validation.ValidateLoginField), and
-	// its client registry entry, keyed by run ID, goes when it leaves. Not
-	// serialized. For in-process embedders.
+	// its client registry entry, keyed by run ID, goes when it leaves. One
+	// identity holds at most 16 logged-in clients, 1024 proxies and 256
+	// names at once, across its connections. Not serialized. For
+	// in-process embedders.
 	Identity     func(net.Conn) string            `json:"-"`
 	QUICIdentity func(tls.ConnectionState) string `json:"-"`
 	// EnableTCPTLS accepts tcp-tls proxies: the embedder ends TLS itself,

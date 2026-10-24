@@ -65,6 +65,7 @@ type ControlManager struct {
 	// controls indexed by run id
 	ctlsByRunID map[string]*controlEntry
 	registry    *registry.ClientRegistry
+	holdings    identityHoldings
 	closed      bool
 
 	mu sync.RWMutex
@@ -140,6 +141,10 @@ func (cm *ControlManager) Add(ctl *Control) error {
 			old.runMu.Unlock()
 			return fmt.Errorf("run id [%s] belongs to another identity", ctl.runID)
 		}
+		if old == nil && ctl.identity != "" && cm.controlsLocked(ctl.identity) >= maxControlsPerIdentity {
+			cm.mu.Unlock()
+			return fmt.Errorf("identity [%s] has %d clients logged in, the most it may", ctl.identity, maxControlsPerIdentity)
+		}
 
 		id := ControlID(nextControlID.Add(1))
 		if err := ctl.admit(cm, id); err != nil {
@@ -177,6 +182,17 @@ func (cm *ControlManager) Add(ctl *Control) error {
 		}
 		return nil
 	}
+}
+
+// controlsLocked counts the controls of identity, logging in or logged in.
+func (cm *ControlManager) controlsLocked(identity string) int {
+	n := 0
+	for _, entry := range cm.ctlsByRunID {
+		if entry.ctl.identity == identity {
+			n++
+		}
+	}
+	return n
 }
 
 // Activate registers ctl as online only if it is still the pending current
@@ -716,6 +732,9 @@ func (ctl *Control) loginUserInfo() plugin.UserInfo {
 
 func (ctl *Control) closeProxy(pxy proxy.Proxy) {
 	pxy.Close()
+	if ctl.identity != "" {
+		ctl.manager.holdings.remove(ctl.identity, proxyNames(pxy.GetConfigurer(), ctl.sessionCtx.ServerCfg.SubDomainHost))
+	}
 	ctl.sessionCtx.PxyManager.Del(pxy.GetName())
 	ctl.serverMetrics.CloseProxy(pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type)
 
@@ -881,6 +900,17 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 	if typ := v1.ProxyType(pxyConf.GetBaseConfig().Type); ctl.identity != "" && typ != v1.ProxyTypeHTTP && typ != v1.ProxyTypeTCPTLS {
 		err = fmt.Errorf("proxy type [%s] is not allowed for a client with an identity", typ)
 		return
+	}
+	if ctl.identity != "" {
+		names := proxyNames(pxyConf, ctl.sessionCtx.ServerCfg.SubDomainHost)
+		if err = ctl.manager.holdings.add(ctl.identity, names); err != nil {
+			return
+		}
+		defer func() {
+			if err != nil {
+				ctl.manager.holdings.remove(ctl.identity, names)
+			}
+		}()
 	}
 
 	// User info
