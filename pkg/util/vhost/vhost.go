@@ -125,6 +125,9 @@ type RouteConfig struct {
 	Headers         map[string]string
 	ResponseHeaders map[string]string
 	RouteByHTTPUser string
+	// Identity is the client identity whose proxies serve the route, or
+	// "": its idle work connections are kept apart from another's.
+	Identity string
 
 	CreateConnFn           CreateConnFunc
 	ChooseEndpointFn       ChooseEndpointFunc
@@ -135,11 +138,11 @@ type RouteConfig struct {
 }
 
 // poolHost is the key under which work connections for this route and
-// endpoint are kept idle: domain.location.user.endpoint, the last three
-// base64. Most routes have no location or user, whose encodings are
-// empty, so only a non-empty part is encoded.
+// endpoint are kept idle: domain.location.user.endpoint.identity, the
+// last four base64. Most routes have no location or user, whose
+// encodings are empty, so only a non-empty part is encoded.
 func (rc *RouteConfig) poolHost(endpoint string) string {
-	return rc.Domain + "." + b64(rc.Location) + "." + b64(rc.RouteByHTTPUser) + "." + b64(endpoint)
+	return rc.Domain + "." + b64(rc.Location) + "." + b64(rc.RouteByHTTPUser) + "." + b64(endpoint) + "." + b64(rc.Identity)
 }
 
 func b64(s string) string {

@@ -33,7 +33,9 @@ import (
 // response on the caller's goroutine. http.Transport hands every request
 // to a writer goroutine and every response back from a reader goroutine:
 // two wakeups a request, which on a small VM cost more than the proxying.
-// Idle work connections are kept per route, as http.Transport kept them.
+// Idle work connections are kept per route and endpoint (the request's
+// URL host, RouteConfig.poolHost), as http.Transport kept them, until
+// close drops them with the endpoint's proxy.
 type workConnTransport struct {
 	dial                  func(ctx context.Context) (net.Conn, error)
 	responseHeaderTimeout time.Duration
@@ -44,8 +46,18 @@ type workConnTransport struct {
 	onError func(*http.Request, error)
 
 	mu     sync.Mutex
-	idle   map[string][]*workConn // oldest first; reuse takes the newest
-	active atomic.Int64           // work connections carrying a request
+	pools  map[string]*workConnPool
+	active atomic.Int64 // work connections carrying a request
+}
+
+// workConnPool is one route and endpoint's idle work connections. Each
+// request holds its pool from choosing it until its connection comes
+// back, so a connection that comes back after close is closed too.
+type workConnPool struct {
+	key     string
+	idle    []*workConn // oldest first; reuse takes the newest
+	holders int
+	closed  bool
 }
 
 type workConn struct {
@@ -74,8 +86,8 @@ func (t *workConnTransport) release(wc *workConn) {
 // counts reports the work connections kept idle and those carrying a request.
 func (t *workConnTransport) counts() (idle, active int) {
 	t.mu.Lock()
-	for _, conns := range t.idle {
-		idle += len(conns)
+	for _, p := range t.pools {
+		idle += len(p.idle)
 	}
 	t.mu.Unlock()
 	return idle, int(t.active.Load())
@@ -175,11 +187,13 @@ func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	key := req.URL.Host
 	switched := false
 	for attempt := 0; ; attempt++ {
-		wc := t.get(key)
+		p := t.hold(key)
+		wc := t.get(p)
 		reused := wc != nil
 		if wc == nil {
 			c, err := t.dial(req.Context())
 			if err != nil {
+				t.put(p, nil)
 				if req.Context().Err() != nil {
 					return nil, req.Context().Err()
 				}
@@ -199,7 +213,7 @@ func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			wc = newWorkConn(c)
 		}
 		t.acquire(wc)
-		resp, stale, err := t.roundTrip(wc, key, req)
+		resp, stale, err := t.roundTrip(wc, p, req)
 		if err == nil {
 			return resp, nil
 		}
@@ -228,15 +242,17 @@ func nextEndpoint(req *http.Request, moved bool) (string, bool) {
 	return rc.poolHost(next), true
 }
 
-// roundTrip sends req on wc and reads its response. stale is true when
-// the connection failed before any of the response arrived.
-func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Request) (resp *http.Response, stale bool, err error) {
+// roundTrip sends req on wc, from p, and reads its response, then puts
+// wc back in p. stale is true when the connection failed before any of
+// the response arrived.
+func (t *workConnTransport) roundTrip(wc *workConn, p *workConnPool, req *http.Request) (resp *http.Response, stale bool, err error) {
 	// A visitor who leaves closes the connection, wherever it is.
 	stopCancel := context.AfterFunc(req.Context(), func() { _ = wc.Close() })
 	fail := func(stage string, err error, stale bool) (*http.Response, bool, error) {
 		stopCancel()
 		t.release(wc)
 		_ = wc.Close()
+		t.put(p, nil)
 		if req.Context().Err() != nil {
 			return nil, false, req.Context().Err()
 		}
@@ -300,6 +316,7 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		// The proxy copies both ways on the connection itself.
 		stopCancel()
+		t.put(p, nil)
 		resp.Body = &upgradedBody{Reader: wc.br, workConn: wc, t: t}
 		return resp, false, nil
 	}
@@ -315,9 +332,10 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 			reuse := stopCancel() && clean && !resp.Close && !req.Close
 			t.release(wc)
 			if reuse {
-				t.put(key, wc)
+				t.put(p, wc)
 			} else {
 				_ = wc.Close()
+				t.put(p, nil)
 			}
 		},
 	}
@@ -331,17 +349,34 @@ func proxyMode(req *http.Request) bool {
 	return info != nil && info.URLHost != ""
 }
 
-func (t *workConnTransport) get(key string) *workConn {
+// hold returns key's pool, held until put.
+func (t *workConnTransport) hold(key string) *workConnPool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p := t.pools[key]
+	if p == nil {
+		if t.pools == nil {
+			t.pools = make(map[string]*workConnPool)
+		}
+		p = &workConnPool{key: key}
+		t.pools[key] = p
+	}
+	p.holders++
+	return p
+}
+
+// get takes the newest of p's idle work connections that can carry a
+// request, if any.
+func (t *workConnTransport) get(p *workConnPool) *workConn {
 	t.mu.Lock()
 	for {
-		conns := t.idle[key]
-		if len(conns) == 0 {
+		if len(p.idle) == 0 {
 			t.mu.Unlock()
 			return nil
 		}
-		wc := conns[len(conns)-1]
-		conns[len(conns)-1] = nil
-		t.idle[key] = conns[:len(conns)-1]
+		wc := p.idle[len(p.idle)-1]
+		p.idle[len(p.idle)-1] = nil
+		p.idle = p.idle[:len(p.idle)-1]
 		t.mu.Unlock()
 		if time.Since(wc.idleSince) < t.idleTimeout && wc.alive() {
 			return wc
@@ -351,31 +386,49 @@ func (t *workConnTransport) get(key string) *workConn {
 	}
 }
 
-func (t *workConnTransport) put(key string, wc *workConn) {
+// put lets go of p, keeping wc, unless nil, idle in it: or closing wc
+// when p is closed or full.
+func (t *workConnTransport) put(p *workConnPool, wc *workConn) {
 	now := time.Now()
-	wc.idleSince = now
-	var old []*workConn
+	var drop []*workConn
 	t.mu.Lock()
-	if t.idle == nil {
-		t.idle = make(map[string][]*workConn)
+	p.holders--
+	if wc != nil {
+		wc.idleSince = now
+		// The oldest are first: drop those idle too long.
+		for len(p.idle) > 0 && now.Sub(p.idle[0].idleSince) >= t.idleTimeout {
+			drop = append(drop, p.idle[0])
+			p.idle = p.idle[1:]
+		}
+		if !p.closed && len(p.idle) < t.maxIdlePerKey {
+			p.idle = append(p.idle, wc)
+		} else {
+			drop = append(drop, wc)
+		}
 	}
-	conns := t.idle[key]
-	// The oldest are first: drop those idle too long.
-	for len(conns) > 0 && now.Sub(conns[0].idleSince) >= t.idleTimeout {
-		old = append(old, conns[0])
-		conns = conns[1:]
+	if p.holders == 0 && len(p.idle) == 0 && t.pools[p.key] == p {
+		delete(t.pools, p.key)
 	}
-	if len(conns) < t.maxIdlePerKey {
-		conns = append(conns, wc)
-		wc = nil
-	}
-	t.idle[key] = conns
 	t.mu.Unlock()
-	for _, c := range old {
+	for _, c := range drop {
 		_ = c.Close()
 	}
-	if wc != nil {
-		_ = wc.Close()
+}
+
+// close closes key's idle work connections, and those carrying its
+// requests once they are done: their proxy left.
+func (t *workConnTransport) close(key string) {
+	t.mu.Lock()
+	p := t.pools[key]
+	var drop []*workConn
+	if p != nil {
+		delete(t.pools, key)
+		p.closed = true
+		drop, p.idle = p.idle, nil
+	}
+	t.mu.Unlock()
+	for _, c := range drop {
+		_ = c.Close()
 	}
 }
 

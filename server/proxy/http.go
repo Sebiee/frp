@@ -80,6 +80,7 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 
 	domains := pxy.buildDomains(pxy.cfg.CustomDomains, pxy.cfg.SubDomain)
 	identity := netpkg.IdentityFromContext(pxy.ctx)
+	routeConfig.Identity = identity
 
 	addrs := make([]string, 0)
 	for _, domain := range domains {
@@ -107,6 +108,7 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 				}
 				pxy.closeFuncs = append(pxy.closeFuncs, func() {
 					pxy.rc.IdentityHTTPGroupCtl.UnRegister(pxy.name, group, tmpRouteConfig)
+					pxy.rc.HTTPReverseProxy.CloseWorkConns(tmpRouteConfig, pxy.name)
 				})
 			} else if pxy.cfg.LoadBalancer.Group != "" {
 				err = pxy.rc.HTTPGroupCtl.Register(pxy.name, pxy.cfg.LoadBalancer.Group, pxy.cfg.LoadBalancer.GroupKey, routeConfig)
@@ -115,6 +117,7 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 				}
 				pxy.closeFuncs = append(pxy.closeFuncs, func() {
 					pxy.rc.HTTPGroupCtl.UnRegister(pxy.name, pxy.cfg.LoadBalancer.Group, tmpRouteConfig)
+					pxy.rc.HTTPReverseProxy.CloseWorkConns(tmpRouteConfig, pxy.name)
 				})
 			} else {
 				err = pxy.rc.HTTPReverseProxy.Register(routeConfig)
@@ -123,6 +126,7 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 				}
 				pxy.closeFuncs = append(pxy.closeFuncs, func() {
 					pxy.rc.HTTPReverseProxy.UnRegister(tmpRouteConfig)
+					pxy.rc.HTTPReverseProxy.CloseWorkConns(tmpRouteConfig, "")
 				})
 			}
 			addrs = append(addrs, util.CanonicalAddr(routeConfig.Domain, pxy.serverCfg.VhostHTTPPort))

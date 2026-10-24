@@ -152,7 +152,7 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 					log.Tracef("choose endpoint name [%s] for http request host [%s] path [%s] httpuser [%s]",
 						endpoint, originalHost, reqRouteInfo.URL, reqRouteInfo.HTTPUser)
 				}
-				// The work connection pool's key: domain.location.user.endpoint.
+				// The work connection pool's key: domain.location.user.endpoint.identity.
 				req.URL.Host = rc.poolHost(endpoint)
 
 				for k, v := range rc.Headers {
@@ -214,6 +214,13 @@ func (rp *HTTPReverseProxy) Register(routeCfg RouteConfig) error {
 // UnRegister unregister route config by domain and location
 func (rp *HTTPReverseProxy) UnRegister(routeCfg RouteConfig) {
 	rp.vhostRouter.Del(routeCfg.Domain, routeCfg.Location, routeCfg.RouteByHTTPUser)
+}
+
+// CloseWorkConns closes the work connections kept idle for routeCfg's
+// endpoint ("" for a route without endpoints), and those carrying its
+// requests once they are done: for a proxy that left the route.
+func (rp *HTTPReverseProxy) CloseWorkConns(routeCfg RouteConfig, endpoint string) {
+	rp.transport.close(routeCfg.poolHost(endpoint))
 }
 
 func (rp *HTTPReverseProxy) GetRouteConfig(domain, location, routeByHTTPUser string) *RouteConfig {
