@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,8 +136,8 @@ func identityServer(t *testing.T) func(identity string) session {
 }
 
 // quicServer runs frps on QUIC, naming every client node/a when named
-// (ServerConfig.QUICIdentity), and returns how a client connects to it.
-func quicServer(t *testing.T, named bool) func() session {
+// (ServerConfig.QUICIdentity), and returns its address.
+func quicServer(t *testing.T, named bool) string {
 	t.Helper()
 	port := freePort(t, "udp")
 	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: freePort(t, "tcp"), QUICBindAddr: "127.0.0.1", QUICBindPort: port}
@@ -147,16 +149,18 @@ func quicServer(t *testing.T, named bool) func() session {
 	require.NoError(t, err)
 	go svr.HandleQUICListener(svr.quicListener)
 	t.Cleanup(func() { _ = svr.Close() })
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+}
 
-	return func() session {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		c, err := quic.DialAddr(ctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
-			&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"frp"}}, &quic.Config{})
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = c.CloseWithError(0, "") })
-		return quicSession{c}
-	}
+// quicDial connects a client to frps on QUIC at addr.
+func quicDial(t *testing.T, addr string) session {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := quic.DialAddr(ctx, addr, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"frp"}}, &quic.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.CloseWithError(0, "") })
+	return quicSession{c}
 }
 
 // testClient is a client logged in on a session, with its control.
@@ -280,14 +284,14 @@ func TestIdentityClientsGetSmallStreamWindows(t *testing.T) {
 		require.Equal(t, 1<<20, n, "a client with no identity keeps frp's 6 MiB window")
 	})
 	t.Run("quic", func(t *testing.T) {
-		node := quicServer(t, true)()
+		node := quicDial(t, quicServer(t, true))
 		c, err := login(t, node, msg.Login{})
 		require.NoError(t, err)
 		n, err := c.pooledWorkConn(node)
 		requireTimeout(t, err)
 		require.LessOrEqual(t, n, window)
 
-		plain := quicServer(t, false)()
+		plain := quicDial(t, quicServer(t, false))
 		c, err = login(t, plain, msg.Login{})
 		require.NoError(t, err)
 		n, err = c.pooledWorkConn(plain)
@@ -442,4 +446,77 @@ func TestIdentityClientsHaveLimits(t *testing.T) {
 		a.send(&msg.CloseProxy{ProxyName: "site1"})
 		require.NoError(t, a.newProxy(httpProxyMsg("site256", "site256.example.com")))
 	})
+}
+
+// quicRelay forwards datagrams between one client and frps at addr, and
+// reports whether frps sent a Retry: a QUIC version 1 long header packet
+// of type 3 (RFC 9000, 17.2.5).
+func quicRelay(t *testing.T, addr string) (string, *atomic.Bool) {
+	t.Helper()
+	front, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	back, err := net.Dial("udp", addr)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = front.Close()
+		_ = back.Close()
+	})
+	var retried atomic.Bool
+	var client atomic.Pointer[net.Addr]
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := front.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			client.Store(&from)
+			_, _ = back.Write(buf[:n])
+		}
+	}()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, err := back.Read(buf)
+			if err != nil {
+				return
+			}
+			p := buf[:n]
+			if n > 5 && p[0]&0xb0 == 0xb0 && binary.BigEndian.Uint32(p[1:5]) == 1 {
+				retried.Store(true)
+			}
+			if to := client.Load(); to != nil {
+				_, _ = front.WriteTo(p, *to)
+			}
+		}
+	}()
+	return front.LocalAddr().String(), &retried
+}
+
+func TestQUICValidatesAddressesWhenItNamesClients(t *testing.T) {
+	for _, named := range []bool{true, false} {
+		relay, retried := quicRelay(t, quicServer(t, named))
+		_, err := login(t, quicDial(t, relay), msg.Login{})
+		require.NoError(t, err)
+		require.Equal(t, named, retried.Load(), "named %v", named)
+	}
+}
+
+func TestQUICNegotiatesNoVersionWhenItNamesClients(t *testing.T) {
+	for _, named := range []bool{true, false} {
+		c, err := net.Dial("udp", quicServer(t, named))
+		require.NoError(t, err)
+		defer c.Close()
+		p := make([]byte, 1200)
+		p[0] = 0xc0
+		binary.BigEndian.PutUint32(p[1:5], 0x1a2a3a4a)
+		p[5] = 8
+		p[14] = 8
+		_, err = c.Write(p)
+		require.NoError(t, err)
+		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := c.Read(p)
+		answered := err == nil && n > 5 && binary.BigEndian.Uint32(p[1:5]) == 0
+		require.Equal(t, !named, answered, "named %v: a version negotiation packet", named)
+	}
 }
