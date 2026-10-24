@@ -551,3 +551,60 @@ func TestIdentitiesHaveTheirOwnProxyNames(t *testing.T) {
 	require.NoError(t, err)
 	eventually(t, func() error { return again.newProxy(httpProxyMsg("web", "app.example.com")) })
 }
+
+// workConn opens a work connection on sess for the client of runID, and
+// returns frps's refusal if it refused. frps keeps one it takes in the
+// client's pool, and says nothing.
+func workConn(t *testing.T, sess session, runID string) error {
+	t.Helper()
+	s, err := sess.open()
+	require.NoError(t, err)
+	defer s.Close()
+	ts := time.Now().Unix()
+	require.NoError(t, msg.WriteMsg(s, &msg.NewWorkConn{RunID: runID, PrivilegeKey: util.GetAuthKey("", ts), Timestamp: ts}))
+	_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	var start msg.StartWorkConn
+	err = msg.ReadMsgInto(s, &start)
+	var ne net.Error
+	switch {
+	case errors.As(err, &ne) && ne.Timeout():
+		return nil
+	case err != nil:
+		return err
+	}
+	return errors.New(start.Error)
+}
+
+// A run ID is its identity's own. Another identity's client that logs
+// in with it, after the owner's client left or while it is logged in,
+// keeps the owner from neither, and replaces neither: each identity's
+// work connections go to its own client.
+func TestIdentitiesHaveTheirOwnRunIDs(t *testing.T) {
+	dial := identityServer(t)
+	a, err := login(t, dial("node/a"), msg.Login{})
+	require.NoError(t, err)
+	runID := a.runID
+	require.NoError(t, a.stream.Close())
+
+	bSess := dial("node/b")
+	var b *testClient
+	eventually(t, func() error {
+		b, err = login(t, bSess, msg.Login{RunID: runID})
+		return err
+	})
+	aSess := dial("node/a")
+	a, err = login(t, aSess, msg.Login{RunID: runID})
+	require.NoError(t, err, "the owner logs in again")
+
+	require.NoError(t, workConn(t, aSess, runID))
+	require.NoError(t, workConn(t, bSess, runID))
+	require.Error(t, workConn(t, dial("node/c"), runID))
+	require.NoError(t, a.newProxy(httpProxyMsg("web", "app.example.com")))
+	require.NoError(t, b.newProxy(httpProxyMsg("web", "other.example.com")))
+
+	c, err := login(t, dial("node/c"), msg.Login{RunID: runID})
+	require.NoError(t, err, "while both are logged in")
+	require.NoError(t, c.newProxy(httpProxyMsg("web", "third.example.com")))
+	require.NoError(t, a.newProxy(httpProxyMsg("api", "app.example.com")), "and neither is replaced")
+	require.NoError(t, b.newProxy(httpProxyMsg("api", "other.example.com")))
+}
