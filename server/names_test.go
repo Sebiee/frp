@@ -316,27 +316,39 @@ func (o *origin) workConn() (*proxy.WorkConn, error) {
 		if msg.ReadMsgInto(conn, &start) != nil {
 			return
 		}
-		br := bufio.NewReader(conn)
-		for {
-			req, err := http.ReadRequest(br)
-			if err != nil {
-				return
-			}
-			if o.hold != nil {
+		var hold func()
+		if o.hold != nil {
+			hold = func() {
 				o.requests <- struct{}{}
 				<-o.hold
 			}
-			_, _ = io.Copy(io.Discard, req.Body)
-			resp := &http.Response{
-				StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1,
-				ContentLength: int64(len(o.node)), Body: io.NopCloser(strings.NewReader(o.node)),
-			}
-			if resp.Write(conn) != nil {
-				return
-			}
 		}
+		answer(conn, o.node, hold)
 	}()
 	return proxy.NewWorkConn(msg.NewConn(c, msg.NewV1ReadWriter(c))), nil
+}
+
+// answer reads requests from c and answers each with body, after each,
+// if set, returns, until c fails.
+func answer(c io.ReadWriter, body string, each func()) {
+	br := bufio.NewReader(c)
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		if each != nil {
+			each()
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		resp := &http.Response{
+			StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1,
+			ContentLength: int64(len(body)), Body: io.NopCloser(strings.NewReader(body)),
+		}
+		if resp.Write(c) != nil {
+			return
+		}
+	}
 }
 
 // request is a visitor's request for host: the body frps answered with.

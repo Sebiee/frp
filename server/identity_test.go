@@ -107,6 +107,13 @@ func freePort(t *testing.T, network string) int {
 // for none, opens a session to it.
 func identityServer(t *testing.T) func(identity string) session {
 	t.Helper()
+	_, dial := identityService(t)
+	return dial
+}
+
+// identityService is identityServer, with the frps it runs.
+func identityService(t *testing.T) (*Service, func(identity string) session) {
+	t.Helper()
 	port := freePort(t, "tcp")
 	cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: port, VhostHTTPPort: port, EnableTCPTLS: true}
 	cfg.Identity = func(c net.Conn) string {
@@ -125,7 +132,7 @@ func identityServer(t *testing.T) func(identity string) session {
 		_ = svr.Close()
 	})
 
-	return func(identity string) session {
+	return svr, func(identity string) session {
 		c, s := net.Pipe()
 		ln.conns <- &identityConn{Conn: s, identity: identity}
 		sess, err := yamux.Client(c, nil)
@@ -552,27 +559,35 @@ func TestIdentitiesHaveTheirOwnProxyNames(t *testing.T) {
 	eventually(t, func() error { return again.newProxy(httpProxyMsg("web", "app.example.com")) })
 }
 
-// workConn opens a work connection on sess for the client of runID, and
-// returns frps's refusal if it refused. frps keeps one it takes in the
-// client's pool, and says nothing.
-func workConn(t *testing.T, sess session, runID string) error {
+// serveWorkConn opens a work connection on sess for the client of
+// runID, and returns frps's refusal if it refused. frps keeps one it
+// takes in the client's pool, and says nothing; once frps starts it, it
+// answers each request on it with body.
+func serveWorkConn(t *testing.T, sess session, runID, body string) error {
 	t.Helper()
 	s, err := sess.open()
 	require.NoError(t, err)
-	defer s.Close()
 	ts := time.Now().Unix()
 	require.NoError(t, msg.WriteMsg(s, &msg.NewWorkConn{RunID: runID, PrivilegeKey: util.GetAuthKey("", ts), Timestamp: ts}))
 	_ = s.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	var start msg.StartWorkConn
 	err = msg.ReadMsgInto(s, &start)
 	var ne net.Error
-	switch {
-	case errors.As(err, &ne) && ne.Timeout():
-		return nil
-	case err != nil:
-		return err
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		_ = s.Close()
+		if err != nil {
+			return err
+		}
+		return errors.New(start.Error)
 	}
-	return errors.New(start.Error)
+	_ = s.SetReadDeadline(time.Time{})
+	go func() {
+		defer s.Close()
+		if msg.ReadMsgInto(s, &start) == nil && start.Error == "" {
+			answer(s, body, nil)
+		}
+	}()
+	return nil
 }
 
 // A run ID is its identity's own. Another identity's client that logs
@@ -580,7 +595,7 @@ func workConn(t *testing.T, sess session, runID string) error {
 // keeps the owner from neither, and replaces neither: each identity's
 // work connections go to its own client.
 func TestIdentitiesHaveTheirOwnRunIDs(t *testing.T) {
-	dial := identityServer(t)
+	svr, dial := identityService(t)
 	a, err := login(t, dial("node/a"), msg.Login{})
 	require.NoError(t, err)
 	runID := a.runID
@@ -596,11 +611,13 @@ func TestIdentitiesHaveTheirOwnRunIDs(t *testing.T) {
 	a, err = login(t, aSess, msg.Login{RunID: runID})
 	require.NoError(t, err, "the owner logs in again")
 
-	require.NoError(t, workConn(t, aSess, runID))
-	require.NoError(t, workConn(t, bSess, runID))
-	require.Error(t, workConn(t, dial("node/c"), runID))
+	require.NoError(t, serveWorkConn(t, bSess, runID, "node/b"))
+	require.NoError(t, serveWorkConn(t, aSess, runID, "node/a"))
+	require.Error(t, serveWorkConn(t, dial("node/c"), runID, "node/c"))
 	require.NoError(t, a.newProxy(httpProxyMsg("web", "app.example.com")))
 	require.NoError(t, b.newProxy(httpProxyMsg("web", "other.example.com")))
+	require.Equal(t, "node/a", request(svr, "app.example.com"), "a work connection goes to its identity's client")
+	require.Equal(t, "node/b", request(svr, "other.example.com"))
 
 	c, err := login(t, dial("node/c"), msg.Login{RunID: runID})
 	require.NoError(t, err, "while both are logged in")
