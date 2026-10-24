@@ -2,8 +2,10 @@ package vhost
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +31,21 @@ func testTransport(t *testing.T, srv *httptest.Server) (*workConnTransport, *ato
 		idleTimeout:           time.Minute,
 		maxIdlePerKey:         4,
 	}, &dials
+}
+
+// pipeTransport is a workConnTransport whose work connections are pipes,
+// with origin serving the other end of each.
+func pipeTransport(origin func(net.Conn)) *workConnTransport {
+	return &workConnTransport{
+		dial: func(context.Context) (net.Conn, error) {
+			c, o := net.Pipe()
+			go origin(o)
+			return c, nil
+		},
+		responseHeaderTimeout: 2 * time.Second,
+		idleTimeout:           time.Minute,
+		maxIdlePerKey:         4,
+	}
 }
 
 func get(t *testing.T, tr http.RoundTripper, ctx context.Context, url string) (*http.Response, string) {
@@ -156,6 +173,74 @@ func TestWorkConnTransportPassesOn1xx(t *testing.T) {
 	resp, body := get(t, tr, ctx, srv.URL)
 	if resp.StatusCode != http.StatusOK || body != "ok" || len(got) != 1 || got[0] != http.StatusEarlyHints {
 		t.Fatalf("status %d body %q 1xx %v", resp.StatusCode, body, got)
+	}
+}
+
+func TestWorkConnTransportBoundsTheResponseHead(t *testing.T) {
+	line := bytes.Repeat([]byte("a"), 1024)
+	t.Run("large", func(t *testing.T) {
+		tr := pipeTransport(func(o net.Conn) {
+			defer o.Close()
+			go io.Copy(io.Discard, o)
+			io.WriteString(o, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n")
+			for i := range 60 {
+				fmt.Fprintf(o, "X-%d: %s\r\n", i, line)
+			}
+			io.WriteString(o, "\r\nok")
+		})
+		resp, body := get(t, tr, context.Background(), "http://app.example.com/")
+		if resp.StatusCode != http.StatusOK || body != "ok" {
+			t.Fatalf("status %d body %q", resp.StatusCode, body)
+		}
+	})
+	t.Run("endless", func(t *testing.T) {
+		var sent atomic.Int64
+		tr := pipeTransport(func(o net.Conn) {
+			defer o.Close()
+			go io.Copy(io.Discard, o)
+			io.WriteString(o, "HTTP/1.1 200 OK\r\nX-Endless: ")
+			for sent.Load() < 8<<20 {
+				n, err := o.Write(line)
+				sent.Add(int64(n))
+				if err != nil {
+					return
+				}
+			}
+		})
+		req, _ := http.NewRequest(http.MethodGet, "http://app.example.com/", nil)
+		_, err := tr.RoundTrip(req)
+		var pe *ProxyError
+		if !errors.As(err, &pe) || pe.Stage != StageHeaders {
+			t.Fatalf("err %v, want a headers error (502)", err)
+		}
+		if n := sent.Load(); n > 128<<10 {
+			t.Fatalf("read %d KiB of one header line", n>>10)
+		}
+	})
+}
+
+func TestWorkConnTransportBoundsInformationalResponses(t *testing.T) {
+	tr := pipeTransport(func(o net.Conn) {
+		defer o.Close()
+		go io.Copy(io.Discard, o)
+		for {
+			if _, err := io.WriteString(o, "HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n"); err != nil {
+				return
+			}
+		}
+	})
+	var got atomic.Int32
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		Got1xxResponse: func(int, textproto.MIMEHeader) error { got.Add(1); return nil },
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://app.example.com/", nil)
+	_, err := tr.RoundTrip(req)
+	var ne net.Error
+	if err == nil || errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("err %v after %d 1xx, want the endless 1xx refused before the header timeout", err, got.Load())
+	}
+	if n := got.Load(); n > 5 {
+		t.Fatalf("%d 1xx responses passed on, want at most 5", n)
 	}
 }
 
