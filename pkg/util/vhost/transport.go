@@ -138,13 +138,38 @@ func (wc *workConn) alive() bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// errResponseHeaderTimeout is a net.Error that times out, so the proxy
-// answers 504 as it did for http.Transport's.
-type errResponseHeaderTimeout struct{}
+// timeoutError is a net.Error that times out, so the proxy answers 504
+// as it did for http.Transport's.
+type timeoutError string
 
-func (errResponseHeaderTimeout) Error() string   { return "timeout awaiting response headers" }
-func (errResponseHeaderTimeout) Timeout() bool   { return true }
-func (errResponseHeaderTimeout) Temporary() bool { return true }
+func (e timeoutError) Error() string { return string(e) }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+const (
+	errResponseHeaderTimeout timeoutError = "timeout awaiting response headers"
+	errRequestWriteTimeout   timeoutError = "timeout writing the request"
+)
+
+// requestWriter writes a request to its work connection, each write
+// within timeout: an origin that stops reading fails the request rather
+// than hold it and its visitor. Each write, not the whole request: a
+// large body may take long.
+type requestWriter struct {
+	conn     net.Conn
+	timeout  time.Duration
+	timedOut bool
+}
+
+func (w *requestWriter) Write(p []byte) (int, error) {
+	_ = w.conn.SetWriteDeadline(time.Now().Add(w.timeout))
+	n, err := w.conn.Write(p)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		w.timedOut = true
+	}
+	return n, err
+}
 
 func (t *workConnTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	key := req.URL.Host
@@ -218,6 +243,9 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 		return nil, stale, &ProxyError{Stage: stage, Err: err}
 	}
 
+	headerTimeout := responseHeaderTimeout(req.Context(), t.responseHeaderTimeout)
+	w := &requestWriter{conn: wc.Conn, timeout: headerTimeout}
+	wc.bw.Reset(w)
 	if proxyMode(req) {
 		err = req.WriteProxy(wc.bw)
 	} else {
@@ -227,12 +255,18 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 		err = wc.bw.Flush()
 	}
 	if err != nil {
+		if w.timedOut {
+			// net/http reports it as the body's read error.
+			err = errRequestWriteTimeout
+		}
 		return fail(StageSend, err, true)
 	}
+	// An upgraded connection's writes start with no deadline.
+	_ = wc.SetWriteDeadline(time.Time{})
 
 	before := wc.read
 	var timedOut atomic.Bool
-	timer := time.AfterFunc(responseHeaderTimeout(req.Context(), t.responseHeaderTimeout), func() {
+	timer := time.AfterFunc(headerTimeout, func() {
 		timedOut.Store(true)
 		_ = wc.Close()
 	})
@@ -256,7 +290,7 @@ func (t *workConnTransport) roundTrip(wc *workConn, key string, req *http.Reques
 	}
 	wc.headEnd = 0
 	if !timer.Stop() || timedOut.Load() {
-		return fail(StageHeaders, errResponseHeaderTimeout{}, false)
+		return fail(StageHeaders, errResponseHeaderTimeout, false)
 	}
 	if err != nil {
 		// Nothing of a response came: the connection was dead already.

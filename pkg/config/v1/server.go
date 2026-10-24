@@ -53,7 +53,9 @@ type ServerConfig struct {
 	// requests.
 	VhostHTTPPort int `json:"vhostHTTPPort,omitempty"`
 	// VhostHTTPTimeout specifies the response header timeout for the Vhost
-	// HTTP server, in seconds. By default, this value is 60.
+	// HTTP server, in seconds. By default, this value is 60. It also bounds
+	// each write of a request to the client: an origin that stops reading
+	// the request fails it.
 	VhostHTTPTimeout int64 `json:"vhostHTTPTimeout,omitempty"`
 	// VhostHTTPBehindProxy means a trusted front proxy (one that terminated
 	// TLS) sits in front of the Vhost HTTP port. Its X-Forwarded-Proto and

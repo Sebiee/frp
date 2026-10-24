@@ -52,7 +52,8 @@ transport.tls.force = false
 vhostHTTPPort = 80
 vhostHTTPSPort = 443
 
-# Response header timeout(seconds) for vhost http server, default is 60s
+# Response header timeout(seconds) for vhost http server, default is 60s.
+# It also bounds each write of a request to the client.
 # vhostHTTPTimeout = 60
 
 # tcpmuxHTTPConnectPort specifies the port that the server listens for TCP

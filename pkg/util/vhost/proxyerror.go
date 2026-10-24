@@ -46,8 +46,9 @@ func (e *ProxyError) Unwrap() error { return e.Err }
 type headerTimeoutKey struct{}
 
 // WithResponseHeaderTimeout sets how long the request routed with ctx
-// waits for the origin's response headers, in place of the proxy's
-// ResponseHeaderTimeoutS. d <= 0 keeps the proxy's.
+// waits for the origin's response headers, and for each write of the
+// request to the origin, in place of the proxy's ResponseHeaderTimeoutS.
+// d <= 0 keeps the proxy's.
 func WithResponseHeaderTimeout(ctx context.Context, d time.Duration) context.Context {
 	return context.WithValue(ctx, headerTimeoutKey{}, d)
 }
