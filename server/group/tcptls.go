@@ -154,7 +154,8 @@ func (c *DomainClaims) Claim(domain, kind, identity string) (name string, releas
 // released: another identity is refused it for the grace. It is for an
 // embedder restoring, after frps restarted, the names its clients had.
 // It refuses what Claim refuses, but for a name identity holds now,
-// which stays held. With no grace, or past maxGraced, it holds nothing.
+// which stays held, and a name past identity's maxGraced. With no
+// grace, it holds nothing.
 func (c *DomainClaims) Bind(domain, identity string) error {
 	name, err := canonicalDomain(domain, DomainKindHTTP)
 	if err != nil {
@@ -177,7 +178,9 @@ func (c *DomainClaims) Bind(domain, identity string) error {
 	default:
 		c.ungrace(identity)
 	}
-	c.startGraceLocked(name, cl)
+	if !c.startGraceLocked(name, cl) && c.grace > 0 {
+		return fmt.Errorf("identity [%s] has %d names in their grace, the most it may", identity, maxGraced)
+	}
 	return nil
 }
 
@@ -201,11 +204,11 @@ func (c *DomainClaims) release(name string, cl *domainClaim) {
 }
 
 // startGraceLocked keeps name, which has no claim now, cl's identity's
-// for the grace, or frees it at once.
-func (c *DomainClaims) startGraceLocked(name string, cl *domainClaim) {
+// for the grace, or frees it at once and returns false.
+func (c *DomainClaims) startGraceLocked(name string, cl *domainClaim) bool {
 	if c.grace <= 0 || c.graced[cl.identity] >= maxGraced {
 		delete(c.m, name)
-		return
+		return false
 	}
 	c.graced[cl.identity]++
 	cl.released = time.Now()
@@ -214,6 +217,7 @@ func (c *DomainClaims) startGraceLocked(name string, cl *domainClaim) {
 	} else {
 		cl.expiry.Reset(c.grace)
 	}
+	return true
 }
 
 // expire forgets cl's name once its grace is up.

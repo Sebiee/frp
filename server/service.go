@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fatedier/golib/crypto"
@@ -831,16 +832,17 @@ func (svr *Service) SetDomainGrace(grace time.Duration) {
 // last proxy for it had just left: another identity is refused it for
 // the grace, and the identity has it back. It is for an embedder that
 // restarts frps with the names its clients had, before they log in. It
-// refuses a name a proxy could not have, and one another identity holds
-// or held within the grace.
+// refuses a name a proxy could not have, one another identity holds or
+// held within the grace, and one past the 4096 names an identity keeps
+// in their grace. With no grace, it holds nothing.
 func (svr *Service) BindDomain(name, identity string) error {
 	return svr.rc.DomainClaims.Bind(name, identity)
 }
 
-// DomainOwner is the client identity whose proxies hold name, as frps
-// names it (OnDomain), or held it within the grace.
+// DomainOwner is the client identity whose proxies hold name, in any
+// case, or held it within the grace.
 func (svr *Service) DomainOwner(name string) (identity string, ok bool) {
-	return svr.rc.DomainClaims.Owner(name)
+	return svr.rc.DomainClaims.Owner(strings.ToLower(name))
 }
 
 // Clients counts the logged-in clients by identity (Identity,
