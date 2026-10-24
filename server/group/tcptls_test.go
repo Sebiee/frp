@@ -3,6 +3,7 @@ package group
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -108,11 +109,11 @@ func TestDomainClaims(t *testing.T) {
 	var conflicts []conflict
 	c.OnConflict = func(d, refused, holder string) { conflicts = append(conflicts, conflict{d, refused, holder}) }
 
-	rel1, err := c.Claim("app.example.com", DomainKindHTTP)
+	_, rel1, err := c.Claim("app.example.com", DomainKindHTTP)
 	require.NoError(err)
-	rel2, err := c.Claim("APP.example.com", DomainKindHTTP)
+	_, rel2, err := c.Claim("APP.example.com", DomainKindHTTP)
 	require.NoError(err)
-	_, err = c.Claim("app.example.com", DomainKindTCPTLS)
+	_, _, err = c.Claim("app.example.com", DomainKindTCPTLS)
 	var claimed *DomainClaimedError
 	require.ErrorAs(err, &claimed)
 	require.Equal(DomainKindHTTP, claimed.Holder)
@@ -120,26 +121,55 @@ func TestDomainClaims(t *testing.T) {
 
 	rel1()
 	rel1() // once
-	_, err = c.Claim("app.example.com", DomainKindTCPTLS)
+	_, _, err = c.Claim("app.example.com", DomainKindTCPTLS)
 	require.Error(err)
 	rel2()
-	rel3, err := c.Claim("app.example.com", DomainKindTCPTLS)
+	_, rel3, err := c.Claim("app.example.com", DomainKindTCPTLS)
 	require.NoError(err)
-	_, err = c.Claim("app.example.com", DomainKindHTTP)
+	_, _, err = c.Claim("app.example.com", DomainKindHTTP)
 	require.ErrorAs(err, &claimed)
 	require.Equal(DomainKindTCPTLS, claimed.Holder)
 	rel3()
 
 	var none *DomainClaims
-	rel, err := none.Claim("x", DomainKindHTTP)
+	_, rel, err := none.Claim("x", DomainKindHTTP)
 	require.NoError(err)
 	rel()
+}
+
+// A name is claimed and routed in one spelling: frps and its embedder
+// never fold two claims into one name, or one into another's.
+func TestDomainClaimsCanonicalNames(t *testing.T) {
+	c := NewDomainClaims()
+	for _, d := range []string{
+		"app.example.com.", "app.example.com:443", "app..example.com", ".example.com", "",
+		"192.0.2.1", "0x7f.1", "app.0x7f", "::1", "[::1]", "*", "*.", "*.com", "app.*.example.com", "*.*.example.com",
+		"app_1.example.com", "app example.com", strings.Repeat("a", 64) + ".example.com",
+	} {
+		_, _, err := c.Claim(d, DomainKindHTTP)
+		require.Error(t, err, d)
+	}
+	_, _, err := c.Claim("*.example.com", DomainKindTCPTLS)
+	require.Error(t, err, "tcp-tls names are exact")
+
+	for d, want := range map[string]string{
+		"App.Example.COM": "app.example.com",
+		"*.Example.com":   "*.example.com",
+		"localhost":       "localhost",
+		"1.example.com":   "1.example.com",
+		"x.1e100.net":     "x.1e100.net",
+	} {
+		name, release, err := c.Claim(d, DomainKindHTTP)
+		require.NoError(t, err, d)
+		require.Equal(t, want, name)
+		release()
+	}
 }
 
 func TestTCPTLSRoutesClaimTheName(t *testing.T) {
 	claims := NewDomainClaims()
 	r := NewTCPTLSRoutes(claims, nil)
-	rel, err := claims.Claim("app.example.com", DomainKindHTTP)
+	_, rel, err := claims.Claim("app.example.com", DomainKindHTTP)
 	require.NoError(t, err)
 	_, err = r.Register("a", "n", "app.example.com", nil, nil)
 	var claimed *DomainClaimedError
@@ -147,19 +177,19 @@ func TestTCPTLSRoutesClaimTheName(t *testing.T) {
 	rel()
 	un, err := r.Register("a", "n", "app.example.com", nil, nil)
 	require.NoError(t, err)
-	_, err = claims.Claim("app.example.com", DomainKindHTTP)
+	_, _, err = claims.Claim("app.example.com", DomainKindHTTP)
 	require.Error(t, err)
 	un()
-	_, err = claims.Claim("app.example.com", DomainKindHTTP)
+	_, _, err = claims.Claim("app.example.com", DomainKindHTTP)
 	require.NoError(t, err)
 }
 
 func TestDomainClaimsReserved(t *testing.T) {
 	c := NewDomainClaims()
 	c.Reserved = func(d string) bool { return d == "tunnel.example.com" }
-	_, err := c.Claim("Tunnel.example.com", DomainKindTCPTLS)
+	_, _, err := c.Claim("Tunnel.example.com", DomainKindTCPTLS)
 	require.ErrorContains(t, err, "reserved")
-	_, err = c.Claim("tunnel.example.com", DomainKindHTTP)
+	_, _, err = c.Claim("tunnel.example.com", DomainKindHTTP)
 	require.ErrorContains(t, err, "reserved")
 	r := NewTCPTLSRoutes(c, nil)
 	_, err = r.Register("a", "n", "tunnel.example.com", nil, nil)

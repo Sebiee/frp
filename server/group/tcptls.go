@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // The kinds of proxy a name can belong to: a name is one or the other.
@@ -48,42 +50,80 @@ func NewDomainClaims() *DomainClaims {
 	return &DomainClaims{m: make(map[string]*domainClaim)}
 }
 
-// Claim holds domain for kind until release is called, or refuses it
-// with a *DomainClaimedError. A nil c claims nothing.
-func (c *DomainClaims) Claim(domain, kind string) (release func(), err error) {
-	if c == nil {
-		return func() {}, nil
+// Claim holds domain, as name, for kind until release is called. name
+// is its canonical form (canonicalDomain), the one to route by. It
+// refuses a name that has none, a reserved one, and one the other kind
+// holds, with a *DomainClaimedError. A nil c claims nothing.
+func (c *DomainClaims) Claim(domain, kind string) (name string, release func(), err error) {
+	name, err = canonicalDomain(domain, kind)
+	if err != nil {
+		return "", nil, err
 	}
-	domain = strings.ToLower(domain)
-	if c.Reserved != nil && c.Reserved(domain) {
-		return nil, fmt.Errorf("domain [%s] is reserved", domain)
+	if c == nil {
+		return name, func() {}, nil
+	}
+	if c.Reserved != nil && c.Reserved(name) {
+		return "", nil, fmt.Errorf("domain [%s] is reserved", name)
 	}
 	c.mu.Lock()
-	cl := c.m[domain]
+	cl := c.m[name]
 	if cl != nil && cl.kind != kind {
 		holder := cl.kind
 		c.mu.Unlock()
 		if c.OnConflict != nil {
-			c.OnConflict(domain, kind, holder)
+			c.OnConflict(name, kind, holder)
 		}
-		return nil, &DomainClaimedError{Domain: domain, Refused: kind, Holder: holder}
+		return "", nil, &DomainClaimedError{Domain: name, Refused: kind, Holder: holder}
 	}
 	if cl == nil {
 		cl = &domainClaim{kind: kind}
-		c.m[domain] = cl
+		c.m[name] = cl
 	}
 	cl.n++
 	c.mu.Unlock()
 	var once sync.Once
-	return func() {
+	return name, func() {
 		once.Do(func() {
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			if cl.n--; cl.n == 0 && c.m[domain] == cl {
-				delete(c.m, domain)
+			if cl.n--; cl.n == 0 && c.m[name] == cl {
+				delete(c.m, name)
 			}
 		})
 	}, nil
+}
+
+// canonicalDomain is domain as frps keys and routes it, in lower case.
+// It refuses what a request's host is never compared with, or could be
+// spelled another way: a port, a trailing dot, an empty or invalid
+// label, an IP address, and a * anywhere but as the first label of an
+// http name with two more.
+func canonicalDomain(domain, kind string) (string, error) {
+	name := strings.ToLower(domain)
+	rest, wildcard := strings.CutPrefix(name, "*.")
+	labels := strings.Split(rest, ".")
+	valid := len(name) <= 253 && !numeric(labels[len(labels)-1])
+	if wildcard {
+		valid = valid && kind == DomainKindHTTP && len(labels) >= 2
+	}
+	for _, label := range labels {
+		valid = valid && len(validation.IsDNS1123Label(label)) == 0
+	}
+	if !valid {
+		return "", fmt.Errorf("domain [%s] is not a host name: want letters, digits, - and dots, "+
+			"no port, trailing dot or IP address, and * only as the first label of an http name", domain)
+	}
+	return name, nil
+}
+
+// numeric is whether a top-level label makes the name an IPv4 address
+// to a URL parser: all digits, or 0x and hex digits.
+func numeric(label string) bool {
+	digits := "0123456789"
+	if rest, ok := strings.CutPrefix(label, "0x"); ok {
+		label, digits = rest, "0123456789abcdef"
+	}
+	return strings.Trim(label, digits) == ""
 }
 
 // ErrTCPTLSNoRoute is TCPTLSRoute.Dial's error when the name has no
@@ -128,8 +168,7 @@ func NewTCPTLSRoutes(claims *DomainClaims, onDomain func(domain string, added bo
 // Register adds proxy, of the client identity, to domain's route, until
 // unregister is called.
 func (r *TCPTLSRoutes) Register(proxy, identity, domain string, alpn []string, dial TCPTLSDialFunc) (unregister func(), err error) {
-	domain = strings.ToLower(domain)
-	release, err := r.claims.Claim(domain, DomainKindTCPTLS)
+	domain, release, err := r.claims.Claim(domain, DomainKindTCPTLS)
 	if err != nil {
 		return nil, err
 	}
