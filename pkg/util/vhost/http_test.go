@@ -175,6 +175,42 @@ func TestHTTPReverseProxyNextEndpoint(t *testing.T) {
 	require.Equal(t, map[string]int{"a": 3, "b": 3}, answers("GET"))
 }
 
+// A route's idle work connections are its client identity's: a route
+// of another identity for the same domain, location, HTTP user and
+// endpoint never gets one.
+func TestHTTPReverseProxyPoolsByIdentity(t *testing.T) {
+	rp := NewHTTPReverseProxy(HTTPReverseProxyOptions{}, NewRouters())
+	route := func(identity string) RouteConfig {
+		return RouteConfig{Domain: "app.example.com", Identity: identity, CreateConnFn: func(string) (net.Conn, error) {
+			c, origin := net.Pipe()
+			go func() {
+				defer origin.Close()
+				br := bufio.NewReader(origin)
+				for {
+					if _, err := http.ReadRequest(br); err != nil {
+						return
+					}
+					_, _ = fmt.Fprintf(origin, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(identity), identity)
+				}
+			}()
+			return c, nil
+		}}
+	}
+	answer := func() string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "app.example.com"
+		rp.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+
+	require.NoError(t, rp.Register(route("node/b")))
+	require.Equal(t, "node/b", answer())
+	rp.UnRegister(route("node/b"))
+	require.NoError(t, rp.Register(route("node/a")))
+	require.Equal(t, "node/a", answer())
+}
+
 func httpProtocols(http1, unencryptedHTTP2 bool) *http.Protocols {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(http1)

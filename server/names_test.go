@@ -1,11 +1,17 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +51,13 @@ func newNamesTestServiceWith(t *testing.T, set func(*v1.ServerConfig)) *Service 
 // node's work connections fail with its name, which reach reports.
 func publish(t *testing.T, svr *Service, node string, pc v1.ProxyConfigurer) (func(), error) {
 	t.Helper()
+	return publishWith(t, svr, node, pc, func() (*proxy.WorkConn, error) { return nil, errors.New(node) })
+}
+
+// publishWith is publish with the node's work connections from
+// workConn.
+func publishWith(t *testing.T, svr *Service, node string, pc v1.ProxyConfigurer, workConn proxy.GetWorkConnFn) (func(), error) {
+	t.Helper()
 	m := &msg.NewProxy{}
 	pc.MarshalToMsg(m)
 	conf, err := config.NewProxyConfigurerFromMsg(m, svr.cfg)
@@ -55,7 +68,7 @@ func publish(t *testing.T, svr *Service, node string, pc v1.ProxyConfigurer) (fu
 		Configurer:         conf,
 		ResourceController: svr.rc,
 		ServerCfg:          svr.cfg,
-		GetWorkConnFn:      func() (*proxy.WorkConn, error) { return nil, errors.New(node) },
+		GetWorkConnFn:      workConn,
 	})
 	require.NoError(t, err)
 	if _, err := pxy.Run(); err != nil {
@@ -281,4 +294,100 @@ func TestEmbedderSetsTheGrace(t *testing.T) {
 	require.NoError(t, err, "a name past the new grace is free")
 	_, ok := svr.DomainOwner("app.example.com")
 	require.True(t, ok)
+}
+
+// origin answers each request on its node's work connections with the
+// node's name, and keeps the connection open after, as frpc does for an
+// origin that keeps connections alive. With hold set, it tells requests
+// of each request, and answers once hold is closed.
+type origin struct {
+	node     string
+	hold     chan struct{}
+	requests chan struct{}
+	closed   atomic.Int32 // work connections frps closed
+}
+
+func (o *origin) workConn() (*proxy.WorkConn, error) {
+	c, conn := net.Pipe()
+	go func() {
+		defer o.closed.Add(1)
+		defer conn.Close()
+		var start msg.StartWorkConn
+		if msg.ReadMsgInto(conn, &start) != nil {
+			return
+		}
+		br := bufio.NewReader(conn)
+		for {
+			req, err := http.ReadRequest(br)
+			if err != nil {
+				return
+			}
+			if o.hold != nil {
+				o.requests <- struct{}{}
+				<-o.hold
+			}
+			_, _ = io.Copy(io.Discard, req.Body)
+			resp := &http.Response{
+				StatusCode: http.StatusOK, ProtoMajor: 1, ProtoMinor: 1,
+				ContentLength: int64(len(o.node)), Body: io.NopCloser(strings.NewReader(o.node)),
+			}
+			if resp.Write(conn) != nil {
+				return
+			}
+		}
+	}()
+	return proxy.NewWorkConn(msg.NewConn(c, msg.NewV1ReadWriter(c))), nil
+}
+
+// request is a visitor's request for host: the body frps answered with.
+func request(svr *Service, host string) string {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = host
+	svr.VhostHTTP().ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+func idleWorkConns(svr *Service) int {
+	_, idle, _ := svr.WorkConns()
+	return idle
+}
+
+// A proxy's idle work connections go with it: frps closes them, so
+// neither another identity that has the name next, nor its proxy of the
+// same name, gets a connection to the node that left.
+func TestIdleWorkConnsLeaveWithTheirProxy(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	svr.SetDomainGrace(0)
+	b := &origin{node: "node/b"}
+	leave, err := publishWith(t, svr, "node/b", httpProxy("web", "app.example.com", ""), b.workConn)
+	require.NoError(t, err)
+	require.Equal(t, "node/b", request(svr, "app.example.com"))
+	require.Equal(t, 1, idleWorkConns(svr))
+
+	leave()
+	require.Eventually(t, func() bool { return b.closed.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Zero(t, idleWorkConns(svr))
+
+	a := &origin{node: "node/a"}
+	_, err = publishWith(t, svr, "node/a", httpProxy("web", "app.example.com", ""), a.workConn)
+	require.NoError(t, err)
+	require.Equal(t, "node/a", request(svr, "app.example.com"))
+}
+
+// A work connection carrying a request when its proxy leaves is closed
+// once the request is done, not kept idle.
+func TestWorkConnsInFlightLeaveWithTheirProxy(t *testing.T) {
+	svr := newNamesTestService(t, nil)
+	b := &origin{node: "node/b", hold: make(chan struct{}), requests: make(chan struct{}, 1)}
+	leave, err := publishWith(t, svr, "node/b", httpProxy("web", "app.example.com", ""), b.workConn)
+	require.NoError(t, err)
+	got := make(chan string)
+	go func() { got <- request(svr, "app.example.com") }()
+	<-b.requests
+	leave()
+	close(b.hold)
+	require.Equal(t, "node/b", <-got)
+	require.Zero(t, idleWorkConns(svr))
+	require.Eventually(t, func() bool { return b.closed.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
 }
