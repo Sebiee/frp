@@ -24,13 +24,15 @@ import (
 // What one client identity (ServerConfig.Identity, QUICIdentity) may hold
 // at once, across all its connections: logged-in clients, each with a
 // pool of work connections; their proxies; and the names those route,
-// each of which costs the embedder state, a certificate perhaps. 16
-// logins leave room for replicas sharing a certificate, and for their
-// reconnects; 1024 proxies are four replicas' for all 256 names. A
-// client without an identity has none of these limits.
+// each of which costs the embedder state, a certificate perhaps. Replicas
+// sharing a certificate each log in and publish every name: 64 logins
+// leave room for about 20 of them on one server, each with a tunnel it is
+// replacing and old ones still carrying streams, and 4096 proxies for
+// that many logins of a cluster's usual few dozen names. A client without
+// an identity has none of these limits.
 const (
-	maxControlsPerIdentity = 16
-	maxProxiesPerIdentity  = 1024
+	maxControlsPerIdentity = 64
+	maxProxiesPerIdentity  = 4096
 	maxNamesPerIdentity    = 256
 )
 

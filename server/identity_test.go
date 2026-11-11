@@ -409,7 +409,7 @@ func TestIdentityClientsHaveLimits(t *testing.T) {
 		dial := identityServer(t)
 		sess := dial("node/a")
 		var first *testClient
-		for i := range 16 {
+		for i := range maxControlsPerIdentity {
 			c, err := login(t, sess, msg.Login{})
 			require.NoError(t, err, "login %d", i)
 			if first == nil {
@@ -434,26 +434,26 @@ func TestIdentityClientsHaveLimits(t *testing.T) {
 		require.NoError(t, err)
 		b, err := login(t, dial("node/a"), msg.Login{})
 		require.NoError(t, err)
-		for i := range 1024 {
+		for i := range maxProxiesPerIdentity {
 			c := a
 			if i%2 == 1 {
 				c = b
 			}
 			require.NoError(t, c.newProxy(httpProxyMsg(fmt.Sprint("web", i), "app.example.com")), "proxy %d", i)
 		}
-		require.Error(t, a.newProxy(httpProxyMsg("web1024", "app.example.com")))
+		require.Error(t, a.newProxy(httpProxyMsg("one-more", "app.example.com")))
 		other, err := login(t, dial("node/b"), msg.Login{})
 		require.NoError(t, err)
 		require.NoError(t, other.newProxy(httpProxyMsg("other", "other.example.com")))
 
 		a.send(&msg.CloseProxy{ProxyName: "web0"})
-		require.NoError(t, a.newProxy(httpProxyMsg("web1024", "app.example.com")))
+		require.NoError(t, a.newProxy(httpProxyMsg("one-more", "app.example.com")))
 	})
 	t.Run("names", func(t *testing.T) {
 		dial := identityServer(t)
 		a, err := login(t, dial("node/a"), msg.Login{})
 		require.NoError(t, err)
-		for i := range 256 {
+		for i := range maxNamesPerIdentity {
 			require.NoError(t, a.newProxy(httpProxyMsg(fmt.Sprint("site", i), fmt.Sprintf("site%d.example.com", i))), "name %d", i)
 		}
 		require.Error(t, a.newProxy(httpProxyMsg("site256", "site256.example.com")))
