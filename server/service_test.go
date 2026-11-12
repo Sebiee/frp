@@ -993,3 +993,25 @@ func TestServiceTLSVerifyConnection(t *testing.T) {
 	require.NotNil(t, svr.tlsConfig.VerifyConnection)
 	require.ErrorIs(t, svr.tlsConfig.VerifyConnection(tls.ConnectionState{}), refused)
 }
+
+// Close may run while Run starts, from another goroutine: it ends Run, and
+// the two share no field without an order the race detector can see.
+func TestServiceCloseWhileRunStarts(t *testing.T) {
+	for range 20 {
+		cfg := &v1.ServerConfig{BindAddr: "127.0.0.1", BindPort: freePort(t, "tcp")}
+		require.NoError(t, cfg.Complete())
+		svr, err := NewService(cfg)
+		require.NoError(t, err)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			svr.Run(context.Background())
+		}()
+		_ = svr.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return after Close")
+		}
+	}
+}

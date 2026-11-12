@@ -132,7 +132,8 @@ type Service struct {
 
 	cfg *v1.ServerConfig
 
-	// service context
+	// service context, from NewService; Close and the end of Run's ctx
+	// cancel it
 	ctx context.Context
 	// call cancel to stop service
 	cancel context.CancelFunc
@@ -185,8 +186,8 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		webServer:         webServer,
 		tlsConfig:         tlsConfig,
 		cfg:               cfg,
-		ctx:               context.Background(),
 	}
+	svr.ctx, svr.cancel = context.WithCancel(context.Background())
 	svr.httpVhostRouter.OnDomain = cfg.OnDomain
 	if webServer != nil {
 		webServer.RouteRegister(svr.registerRouteHandlers)
@@ -410,9 +411,10 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 }
 
 func (svr *Service) Run(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	svr.ctx = ctx
-	svr.cancel = cancel
+	// The service's context is NewService's, so that Close, from any
+	// goroutine and even before Run, cancels it without a race; ctx ending
+	// ends it too.
+	defer context.AfterFunc(ctx, svr.cancel)()
 
 	// run dashboard web server.
 	if svr.webServer != nil {
