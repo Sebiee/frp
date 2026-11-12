@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -129,11 +130,39 @@ func NewServerTLSConfigWith(certPath, keyPath, caPath string, get func(*tls.Clie
 			return nil, err
 		}
 
-		base.ClientAuth = tls.RequireAndVerifyClientCert
-		base.ClientCAs = pool
+		// The certificate request names no CA: ClientCAs stays empty, and
+		// the chain is checked here instead. A client without one of our
+		// certificates learns nothing about who issues them.
+		base.ClientAuth = tls.RequireAnyClientCert
+		base.VerifyConnection = VerifyClientChain(pool)
 	}
 
 	return base, nil
+}
+
+// VerifyClientChain checks a client certificate against pool as
+// tls.RequireAndVerifyClientCert would, for a config that asks with
+// RequireAnyClientCert and leaves ClientCAs empty so that its certificate
+// request names no CA. It is a VerifyConnection, which also runs for a
+// resumed session, so the chain is checked again at the current time.
+func VerifyClientChain(pool *x509.CertPool) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return errors.New("tls: no client certificate")
+		}
+		opts := x509.VerifyOptions{
+			Roots:         pool,
+			Intermediates: x509.NewCertPool(),
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		}
+		for _, c := range cs.PeerCertificates[1:] {
+			opts.Intermediates.AddCert(c)
+		}
+		if _, err := cs.PeerCertificates[0].Verify(opts); err != nil {
+			return fmt.Errorf("tls: client certificate: %w", err)
+		}
+		return nil
+	}
 }
 
 // NewClientTLSConfig verifies the server against the CAs in caPath, or

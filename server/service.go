@@ -148,7 +148,19 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	tlsConfig.VerifyConnection = cfg.Transport.TLS.VerifyConnection
+	if verify := cfg.Transport.TLS.VerifyConnection; verify != nil {
+		// After the chain check, when there is one: a client certificate
+		// is verified first, then the caller's own check.
+		chain := tlsConfig.VerifyConnection
+		tlsConfig.VerifyConnection = func(cs tls.ConnectionState) error {
+			if chain != nil {
+				if err := chain(cs); err != nil {
+					return err
+				}
+			}
+			return verify(cs)
+		}
+	}
 
 	var webServer *httppkg.Server
 	if cfg.WebServer.Port > 0 {
