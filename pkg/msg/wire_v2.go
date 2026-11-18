@@ -44,6 +44,11 @@ const (
 	V2TypeNatHoleSid         uint16 = 17
 	V2TypeNatHoleReport      uint16 = 18
 	V2TypeUDPPacketBinary    uint16 = 19
+	// The fork's own messages take IDs from 0x7F00, far from upstream's,
+	// which count up from 1: an upstream message cannot take one, and a
+	// peer of either keeps its meaning.
+	V2TypeLeave     uint16 = 0x7F00
+	V2TypeLeaveResp uint16 = 0x7F01
 )
 
 var v2MsgTypeMap = map[uint16]any{
@@ -65,6 +70,8 @@ var v2MsgTypeMap = map[uint16]any{
 	V2TypeNatHoleResp:        NatHoleResp{},
 	V2TypeNatHoleSid:         NatHoleSid{},
 	V2TypeNatHoleReport:      NatHoleReport{},
+	V2TypeLeave:              Leave{},
+	V2TypeLeaveResp:          LeaveResp{},
 }
 
 var v2MsgReflectTypeMap, v2MsgTypeIDMap = buildV2MsgTypeMaps()

@@ -67,6 +67,9 @@ type ControlManager struct {
 	registry    *registry.ClientRegistry
 	holdings    identityHoldings
 	closed      bool
+	// spreadMu makes the login counts and the leaves of the identities one
+	// at a time (identity_spread.go). It is taken before mu, never after.
+	spreadMu sync.Mutex
 
 	mu sync.RWMutex
 }
@@ -463,6 +466,9 @@ type Control struct {
 
 	// proxies in one client
 	proxies map[string]proxy.Proxy
+	// published is whether the client ever had a proxy, and leaving
+	// whether it has been granted a leave (identity_spread.go).
+	published, leaving bool
 
 	// pool count
 	poolCount int
@@ -808,6 +814,10 @@ func (ctl *Control) registerMsgHandlers() {
 		ctl.msgDispatcher.RegisterHandler(&msg.NatHoleReport{}, msg.AsyncHandler(ctl.handleNatHoleReport))
 	}
 	ctl.msgDispatcher.RegisterHandler(&msg.CloseProxy{}, ctl.handleCloseProxy)
+	// Only a client with an identity is counted, and told so at its login.
+	if ctl.identity != "" {
+		ctl.msgDispatcher.RegisterHandler(&msg.Leave{}, ctl.handleLeave)
+	}
 }
 
 func (ctl *Control) handleNewProxy(m msg.Message) {
@@ -984,6 +994,7 @@ func (ctl *Control) RegisterProxy(pxyMsg *msg.NewProxy) (remoteAddr string, err 
 
 	ctl.mu.Lock()
 	ctl.proxies[pxy.GetName()] = pxy
+	ctl.published = true
 	ctl.mu.Unlock()
 	return
 }

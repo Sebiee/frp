@@ -107,7 +107,7 @@ func TestControlSessionDialerDialV1(t *testing.T) {
 			serverErrCh <- fmt.Errorf("unexpected user: %s", loginMsg.User)
 			return
 		}
-		serverErrCh <- rw.WriteMsg(&msg.LoginResp{RunID: "run-v1"})
+		serverErrCh <- rw.WriteMsg(&msg.LoginResp{RunID: "run-v1", Peers: 3})
 	}()
 
 	dialer := newTestControlSessionDialer(t, wire.ProtocolV1, connector, nil)
@@ -117,6 +117,7 @@ func TestControlSessionDialerDialV1(t *testing.T) {
 	defer sessionCtx.Connector.Close()
 
 	require.Equal(t, "run-v1", sessionCtx.RunID)
+	require.Equal(t, 3, sessionCtx.Peers, "the server's count comes with the login")
 	require.Empty(t, sessionCtx.UDPPacketCodec)
 	require.NotNil(t, sessionCtx.Conn)
 	require.NotNil(t, sessionCtx.Connector)

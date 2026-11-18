@@ -557,12 +557,19 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 			}
 			return
 		}
+		// The identity's logins on this server, this one among them: a
+		// client spreads its logins over several servers by it.
+		peers := 0
+		if ctl.identity != "" {
+			peers = svr.ctlManager.peers(ctl.identity)
+		}
 		if err = svr.completeControlLogin(ctl, func() error {
 			return writeWithDeadline(conn, connWriteTimeout, func() error {
 				return acceptedConn.conn.WriteMsg(&msg.LoginResp{
 					Version: version.Full(),
 					RunID:   ctl.runID,
 					Error:   "",
+					Peers:   peers,
 				})
 			})
 		}); err != nil {

@@ -16,7 +16,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,6 +52,9 @@ type SessionContext struct {
 	VnetController *vnet.Controller
 	// UDPPacketCodec is immutable for the lifetime of this negotiated session.
 	UDPPacketCodec string
+	// Peers is the count the server gave with the login (msg.LoginResp),
+	// 0 from a server that gives none: such a server does not know Leave.
+	Peers int
 }
 
 type Control struct {
@@ -78,6 +84,9 @@ type Control struct {
 	// msgDispatcher is a wrapper for control connection.
 	// It provides a channel for sending messages, and you can register handlers to process messages based on their respective types.
 	msgDispatcher *msg.Dispatcher
+
+	// leaveMu makes one Leave wait for its answer at a time.
+	leaveMu sync.Mutex
 }
 
 func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, error) {
@@ -199,6 +208,43 @@ func (ctl *Control) handlePong(m msg.Message) {
 	xl.Debugf("receive heartbeat from server")
 }
 
+func (ctl *Control) handleLeaveResp(m msg.Message) {
+	inMsg := m.(*msg.LeaveResp)
+	if !ctl.msgTransporter.DispatchWithType(inMsg, typeNameLeaveResp, inMsg.RunID) {
+		ctl.xl.Tracef("no one waits for the LeaveResp message")
+	}
+}
+
+var typeNameLeaveResp = reflect.TypeFor[msg.LeaveResp]().Name()
+
+// ErrLeaveUnknown is the answer for a server that gave no count with the
+// login: it does not know Leave, and would close the control at one.
+var ErrLeaveUnknown = errors.New("the server does not know the leave message")
+
+// leave sends m and waits for its answer, until ctx ends or the control
+// closes.
+func (ctl *Control) leave(ctx context.Context, m *msg.Leave) (*msg.LeaveResp, error) {
+	if ctl.sessionCtx.Peers == 0 {
+		return nil, ErrLeaveUnknown
+	}
+	ctl.leaveMu.Lock()
+	defer ctl.leaveMu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-ctl.doneCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	resp, err := ctl.msgTransporter.Do(ctx, m, m.RunID, typeNameLeaveResp)
+	if err != nil {
+		return nil, err
+	}
+	return resp.(*msg.LeaveResp), nil
+}
+
 // closeSession closes the control connection.
 func (ctl *Control) closeSession() {
 	ctl.sessionCtx.Conn.Close()
@@ -234,6 +280,7 @@ func (ctl *Control) registerMsgHandlers() {
 	ctl.msgDispatcher.RegisterHandler(&msg.NewProxyResp{}, ctl.handleNewProxyResp)
 	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleResp{}, ctl.handleNatHoleResp)
 	ctl.msgDispatcher.RegisterHandler(&msg.Pong{}, ctl.handlePong)
+	ctl.msgDispatcher.RegisterHandler(&msg.LeaveResp{}, ctl.handleLeaveResp)
 }
 
 // heartbeatWorker sends heartbeat to server and check heartbeat timeout.

@@ -15,6 +15,8 @@
 package msg
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -40,10 +42,12 @@ func TestV1MessageTypeIDsAreStable(t *testing.T) {
 	require.Equal(t, byte('m'), TypeNatHoleResp)
 	require.Equal(t, byte('5'), TypeNatHoleSid)
 	require.Equal(t, byte('6'), TypeNatHoleReport)
+	require.Equal(t, byte('l'), TypeLeave)
+	require.Equal(t, byte('7'), TypeLeaveResp)
 }
 
 func TestMessageTypeMapIsCompleteAndUnique(t *testing.T) {
-	require.Len(t, msgTypeMap, 18)
+	require.Len(t, msgTypeMap, 20)
 
 	msgTypes := make(map[reflect.Type]struct{}, len(msgTypeMap))
 
@@ -52,4 +56,38 @@ func TestMessageTypeMapIsCompleteAndUnique(t *testing.T) {
 		require.NotContains(t, msgTypes, msgType)
 		msgTypes[msgType] = struct{}{}
 	}
+}
+
+// A leave and its answer cross both wire protocols. A login answer without
+// a count is the bytes it was before the count, and a peer from before the
+// count reads one with it as it read the others.
+func TestLeaveMessagesAndTheLoginCount(t *testing.T) {
+	for _, wireProtocol := range []string{"v1", "v2"} {
+		var buf bytes.Buffer
+		rw := NewReadWriter(&buf, wireProtocol)
+		for _, in := range []Message{
+			&Leave{RunID: "there", Peers: 2},
+			&Leave{RunID: "there", Stay: true},
+			&LeaveResp{RunID: "there", Granted: true, Serving: 3},
+		} {
+			require.NoError(t, rw.WriteMsg(in), wireProtocol)
+			out, err := rw.ReadMsg()
+			require.NoError(t, err, wireProtocol)
+			require.Equal(t, in, out, wireProtocol)
+		}
+	}
+
+	plain, err := json.Marshal(&LoginResp{Version: "v", RunID: "run"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"version":"v","run_id":"run"}`, string(plain))
+
+	counted, err := json.Marshal(&LoginResp{Version: "v", RunID: "run", Peers: 3})
+	require.NoError(t, err)
+	var old struct {
+		Version string `json:"version,omitempty"`
+		RunID   string `json:"run_id,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}
+	require.NoError(t, json.Unmarshal(counted, &old))
+	require.Equal(t, "run", old.RunID)
 }

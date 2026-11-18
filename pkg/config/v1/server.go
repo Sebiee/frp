@@ -77,6 +77,10 @@ type ServerConfig struct {
 	// without an error message, so the client does not log one. Not
 	// serialized. For in-process embedders.
 	OnWorkConnDiscarded func() `json:"-"`
+	// OnLeave, when set, is called for each answer to a client's question
+	// whether it may leave for another server (msg.Leave), with the
+	// client's identity. Not serialized. For in-process embedders.
+	OnLeave func(identity string, granted bool) `json:"-"`
 	// OnQUICConn, when set, is called for each client connection accepted
 	// on QUIC, after its handshake; the func it returns, if not nil, when
 	// the connection ends. Not serialized. For in-process embedders.

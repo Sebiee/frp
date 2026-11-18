@@ -100,6 +100,7 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 		Connector:      newMessageConnector(connector, d.common.Transport.WireProtocol),
 		VnetController: d.vnetController,
 		UDPPacketCodec: loginResult.udpPacketCodec,
+		Peers:          loginRespMsg.Peers,
 	}, nil
 }
 

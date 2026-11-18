@@ -177,6 +177,7 @@ type testClient struct {
 	stream stream
 	ctl    io.ReadWriter // encrypted after the login
 	runID  string
+	peers  int // the count in the login answer
 }
 
 // login logs in on sess with m, and returns frps's refusal if it refused.
@@ -197,7 +198,7 @@ func login(t *testing.T, sess session, m msg.Login) (*testClient, error) {
 	}
 	rw, err := netpkg.NewCryptoReadWriter(s, nil)
 	require.NoError(t, err)
-	return &testClient{t: t, sess: sess, stream: s, ctl: rw, runID: resp.RunID}, nil
+	return &testClient{t: t, sess: sess, stream: s, ctl: rw, runID: resp.RunID, peers: resp.Peers}, nil
 }
 
 // send writes m on the control.

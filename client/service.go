@@ -490,6 +490,63 @@ func (svr *Service) getVisitorCfg(name string) (v1.VisitorConfigurer, bool) {
 	return ctl.vm.GetVisitorCfg(name)
 }
 
+// control is the control of the login the service is on now, nil while it
+// has none.
+func (svr *Service) control() *Control {
+	svr.ctlMu.RLock()
+	ctl := svr.ctl
+	svr.ctlMu.RUnlock()
+	if ctl == nil {
+		return nil
+	}
+	select {
+	case <-ctl.Done():
+		return nil
+	default:
+		return ctl
+	}
+}
+
+// Login is the login the service is on now: the run ID the server gave it,
+// and the count it gave with it (msg.LoginResp.Peers), 0 from a server
+// that gives none. ok is false while the service is not logged in.
+func (svr *Service) Login() (runID string, peers int, ok bool) {
+	ctl := svr.control()
+	if ctl == nil {
+		return "", 0, false
+	}
+	return ctl.sessionCtx.RunID, ctl.sessionCtx.Peers, true
+}
+
+// Leave asks the server the service is logged in on whether it may take
+// its proxies to another server, where it has logged in as runID and got
+// the count peers (another Service's Login). On a grant the server counts
+// this login as gone, so the caller closes its proxies here once the other
+// login carries them, or says Stay. serving is the server's own count.
+// The error is ErrLeaveUnknown for a server that gave no count with the
+// login.
+func (svr *Service) Leave(ctx context.Context, runID string, peers int) (granted bool, serving int, err error) {
+	return svr.leave(ctx, &msg.Leave{RunID: runID, Peers: peers})
+}
+
+// Stay takes back a leave the server granted.
+func (svr *Service) Stay(ctx context.Context) error {
+	_, _, err := svr.leave(ctx, &msg.Leave{Stay: true})
+	return err
+}
+
+func (svr *Service) leave(ctx context.Context, m *msg.Leave) (bool, int, error) {
+	ctl := svr.control()
+	if ctl == nil {
+		return false, 0, errors.New("not logged in")
+	}
+	resp, err := ctl.leave(ctx, m)
+	if err != nil {
+		return false, 0, err
+	}
+	return resp.Granted, resp.Serving, nil
+}
+
 func (svr *Service) StatusExporter() StatusExporter {
 	return &statusExporterImpl{
 		getProxyStatusFunc: svr.getProxyStatus,

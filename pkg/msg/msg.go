@@ -38,6 +38,8 @@ const (
 	TypeNatHoleResp        byte = 'm'
 	TypeNatHoleSid         byte = '5'
 	TypeNatHoleReport      byte = '6'
+	TypeLeave              byte = 'l'
+	TypeLeaveResp          byte = '7'
 )
 
 var msgTypeMap = map[byte]any{
@@ -59,6 +61,8 @@ var msgTypeMap = map[byte]any{
 	TypeNatHoleResp:        NatHoleResp{},
 	TypeNatHoleSid:         NatHoleSid{},
 	TypeNatHoleReport:      NatHoleReport{},
+	TypeLeave:              Leave{},
+	TypeLeaveResp:          LeaveResp{},
 }
 
 var TypeNameNatHoleResp = reflect.TypeFor[NatHoleResp]().Name()
@@ -96,6 +100,32 @@ type LoginResp struct {
 	Version string `json:"version,omitempty"`
 	RunID   string `json:"run_id,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Peers counts the logins of the client's identity on this server
+	// that serve now or have not published yet, this one among them. A
+	// server that sends it answers Leave; one that does not (an older
+	// one, or a client without an identity) closes the control at a Leave,
+	// as at any message it does not know.
+	Peers int `json:"peers,omitempty"`
+}
+
+// Leave is a client's question to the server that carries its proxies:
+// may it take them to another server, where it has logged in as RunID and
+// was told Peers (that login's LoginResp)? The server grants it when more
+// logins of the identity serve here than Peers, and then counts the
+// client as gone. Stay takes a granted leave back. The answer is a
+// LeaveResp.
+type Leave struct {
+	RunID string `json:"run_id,omitempty"`
+	Peers int    `json:"peers,omitempty"`
+	Stay  bool   `json:"stay,omitempty"`
+}
+
+// LeaveResp answers the Leave of the same RunID. Serving counts the
+// logins of the identity that served on this server when it was asked.
+type LeaveResp struct {
+	RunID   string `json:"run_id,omitempty"`
+	Granted bool   `json:"granted,omitempty"`
+	Serving int    `json:"serving,omitempty"`
 }
 
 // When frpc login success, send this message to frps for running a new proxy.
